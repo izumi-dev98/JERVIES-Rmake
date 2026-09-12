@@ -388,7 +388,7 @@ class DashboardServer:
 
     # ── one-time key management ───────────────────────────────────────────
 
-    def new_key(self, expiry_secs: int = 600) -> str:
+    def new_key(self, expiry_secs: int = 1800) -> str:
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))

@@ -2599,13 +2599,13 @@ class RemoteKeyOverlay(QWidget):
 
         self._update_qr(auto_login_url)
 
-        lay.addWidget(_lbl("Scan with phone camera to connect instantly", 8, color=C.TEXT_DIM))
+        lay.addWidget(_lbl("Scan this QR once · PC and phone must use the same Wi-Fi", 8, color=C.TEXT_DIM))
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
         lay.addWidget(sep2)
 
-        lay.addWidget(_lbl("Or enter manually:", 7, color=C.TEXT_DIM,
+        lay.addWidget(_lbl("Or enter the URL in your phone browser, then enter the PIN:", 7, color=C.TEXT_DIM,
                            align=Qt.AlignmentFlag.AlignLeft))
 
         self._url_lbl = QLabel(self._manual_url)
@@ -2784,6 +2784,8 @@ class MainWindow(QMainWindow):
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _usage_sig      = pyqtSignal(str, str, str, str, str, str)
     _workspace_sig  = pyqtSignal(str, str, str)
+    _connection_sig = pyqtSignal(str)
+    _active_model_sig = pyqtSignal(str, str)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2814,6 +2816,7 @@ class MainWindow(QMainWindow):
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
+        self.on_api_key_change = None      # callable: () -> None — reconnect with new key
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
@@ -2970,6 +2973,8 @@ class MainWindow(QMainWindow):
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._usage_sig.connect(self._update_usage_panel)
         self._workspace_sig.connect(self._update_workspace_panel)
+        self._connection_sig.connect(self._update_connection_status)
+        self._active_model_sig.connect(self._update_active_model)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3570,6 +3575,11 @@ class MainWindow(QMainWindow):
         self._date_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
+        self._connection_lbl = QLabel("●  JARVIS DISCONNECTED")
+        self._connection_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._connection_lbl.setStyleSheet(f"color: {C.RED}; background: transparent;")
+        self._connection_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right_col.addWidget(self._connection_lbl)
         lay.addLayout(right_col)
         return w
 
@@ -3663,6 +3673,22 @@ class MainWindow(QMainWindow):
         usage_title.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
         usage_title.setStyleSheet(f"color: {C.PRI}; background: transparent; border: none;")
         usage_lay.addWidget(usage_title)
+        self._usage_connection_lbl = QLabel("CONNECTION  DISCONNECTED")
+        self._usage_connection_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._usage_connection_lbl.setStyleSheet(f"color: {C.RED}; background: transparent; border: none;")
+        usage_lay.addWidget(self._usage_connection_lbl)
+        cfg = _read_full_config()
+        self._usage_local_lbl = QLabel(
+            f"LOCAL AI  {str(cfg.get('llm_provider', 'ollama')).upper()} / "
+            f"{cfg.get('llm_model', 'llama3.2')}"
+        )
+        self._usage_local_lbl.setFont(QFont("Courier New", 7))
+        self._usage_local_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        usage_lay.addWidget(self._usage_local_lbl)
+        self._usage_active_lbl = QLabel("ACTIVE MODEL  --")
+        self._usage_active_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._usage_active_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
+        usage_lay.addWidget(self._usage_active_lbl)
         self._usage_model_lbl = QLabel("MODEL  --")
         self._usage_turns_lbl = QLabel("TURNS  0   TOOLS  0")
         self._usage_tokens_lbl = QLabel("TOKENS  IN -- / OUT --")
@@ -3739,6 +3765,28 @@ class MainWindow(QMainWindow):
         self._usage_turns_lbl.setText(f"TURNS  {turns}   TOOLS  {tools}")
         self._usage_tokens_lbl.setText(f"TOKENS  IN {input_tokens} / OUT {output_tokens}")
         self._usage_total_lbl.setText(f"TOTAL  {total_tokens}")
+
+    def set_active_model(self, provider: str, model: str) -> None:
+        """Thread-safe: show the model currently serving the live session."""
+        self._win._usage_active_lbl.setText(f"ACTIVE MODEL  {provider.upper()} / {model}")
+
+    def _update_connection_status(self, status: str):
+        labels = {
+            "connected": ("●  JARVIS CONNECTED", C.GREEN),
+            "reconnecting": ("◌  JARVIS RECONNECTING", C.ACC2),
+            "disconnected": ("●  JARVIS DISCONNECTED", C.RED),
+            "connecting": ("◌  JARVIS CONNECTING", C.ACC2),
+        }
+        text, color = labels.get(status, labels["disconnected"])
+        self._connection_lbl.setText(text)
+        self._connection_lbl.setStyleSheet(f"color: {color}; background: transparent;")
+        self._usage_connection_lbl.setText(f"CONNECTION  {status.upper()}")
+        self._usage_connection_lbl.setStyleSheet(
+            f"color: {color}; background: transparent; border: none;"
+        )
+
+    def _update_active_model(self, provider: str, model: str):
+        self._usage_active_lbl.setText(f"ACTIVE MODEL  {provider.upper()} / {model}")
 
     def _update_workspace_panel(self, path, views, errors):
         self._workspace_path_lbl.setText(f"MARK LIII  {path}")
@@ -4007,6 +4055,22 @@ class MainWindow(QMainWindow):
         settings_btn.setStyleSheet(_BTN_STYLE_DIM)
         settings_btn.clicked.connect(self._open_plugin_settings)
         lay.addWidget(settings_btn)
+
+        api_btn = QPushButton("🔑  GEMINI API KEY")
+        api_btn.setFixedHeight(26)
+        api_btn.setFont(QFont("Courier New", 7))
+        api_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        api_btn.setStyleSheet(_BTN_STYLE_DIM)
+        api_btn.clicked.connect(self._open_api_key)
+        lay.addWidget(api_btn)
+
+        router_btn = QPushButton("◎  OPENROUTER AI")
+        router_btn.setFixedHeight(26)
+        router_btn.setFont(QFont("Courier New", 7))
+        router_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        router_btn.setStyleSheet(_BTN_STYLE_DIM)
+        router_btn.clicked.connect(self._open_openrouter)
+        lay.addWidget(router_btn)
 
         w.adjustSize()
         return w
@@ -4577,6 +4641,51 @@ class MainWindow(QMainWindow):
         if self.on_audio_device_change:
             self.on_audio_device_change()
 
+    def _open_api_key(self):
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+
+        current = _read_full_config().get("gemini_api_key", "")
+        value, accepted = QInputDialog.getText(
+            self, "GEMINI API KEY", "Paste a new Gemini API key:",
+            QLineEdit.EchoMode.Password, current,
+        )
+        value = value.strip()
+        if not accepted or not value:
+            return
+        try:
+            data = _read_full_config()
+            data["gemini_api_key"] = value
+            API_FILE.parent.mkdir(parents=True, exist_ok=True)
+            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+            self._log.append_log("SYS: Gemini API key updated — reconnecting.")
+            if self.on_api_key_change:
+                self.on_api_key_change()
+        except Exception as error:
+            self._log.append_log(f"ERR: API key could not be saved — {error}")
+
+    def _open_openrouter(self):
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+
+        cfg = _read_full_config()
+        current = cfg.get("openrouter_api_key", "")
+        value, accepted = QInputDialog.getText(
+            self, "OPENROUTER AI", "Paste OpenRouter API key:",
+            QLineEdit.EchoMode.Password, current,
+        )
+        value = value.strip()
+        if not accepted or not value:
+            return
+        try:
+            cfg["openrouter_api_key"] = value
+            cfg["llm_provider"] = "openrouter"
+            cfg["llm_url"] = "https://openrouter.ai/api"
+            cfg["llm_model"] = "openrouter/free"
+            API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+            self._usage_local_lbl.setText("LOCAL AI  OPENROUTER / openrouter/free")
+            self._log.append_log("SYS: OpenRouter configured — local AI provider updated.")
+        except Exception as error:
+            self._log.append_log(f"ERR: OpenRouter could not be saved — {error}")
+
     # ── Memory panel ─────────────────────────────────────────────────────────
 
     def _open_memory_panel(self):
@@ -4764,6 +4873,12 @@ class JarvisUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        # Raise the baseline for interactive controls while leaving the HUD's
+        # deliberately larger headings and display typography untouched.
+        self._app.setFont(QFont("Courier New", 10))
+        self._app.setStyleSheet(
+            "QPushButton, QLineEdit, QTextEdit, QComboBox { font-size: 10pt; }"
+        )
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
@@ -4820,6 +4935,22 @@ class JarvisUI:
     @on_audio_device_change.setter
     def on_audio_device_change(self, cb):
         self._win.on_audio_device_change = cb
+
+    def set_connection_status(self, status: str) -> None:
+        """Thread-safe: show Live API connection state in the navbar and usage panel."""
+        self._win._connection_sig.emit(status)
+
+    def set_active_model(self, provider: str, model: str) -> None:
+        """Thread-safe: show the model currently serving the live session."""
+        self._win._active_model_sig.emit(provider, model)
+
+    @property
+    def on_api_key_change(self):
+        return self._win.on_api_key_change
+
+    @on_api_key_change.setter
+    def on_api_key_change(self, cb):
+        self._win.on_api_key_change = cb
 
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action

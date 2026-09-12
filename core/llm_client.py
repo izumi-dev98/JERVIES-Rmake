@@ -42,13 +42,15 @@ CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 _DEFAULTS = {
     "llm_url":      "http://localhost:11434",
     "llm_model":    "llama3.2",
-    "llm_provider": "ollama",   # "ollama" | "openai"
+    "llm_provider": "ollama",   # "ollama" | "openai" | "openrouter"
 }
 
 
 def get_llm_provider() -> str:
-    """Returns 'ollama' or 'openai' (covers LM Studio, LocalAI, Jan, etc.)."""
+    """Returns ollama, openai-compatible, or openrouter."""
     raw = _load_config().get("llm_provider", "ollama").strip().lower()
+    if raw in ("openrouter", "open-router"):
+        return "openrouter"
     return "openai" if raw in ("openai", "lmstudio", "localai", "jan", "llamacpp") else "ollama"
 
 
@@ -57,6 +59,30 @@ def _load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _openai_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if get_llm_provider() == "openrouter":
+        key = str(_load_config().get("openrouter_api_key", "")).strip()
+        if not key:
+            raise RuntimeError("OpenRouter API key is missing.")
+        headers["Authorization"] = f"Bearer {key}"
+        headers["HTTP-Referer"] = "https://github.com/izumi-dev98/JERVIES-Rmake"
+        headers["X-Title"] = "Mark LIII JARVIS"
+    return headers
+
+
+def get_llm_usage() -> dict[str, str | int]:
+    """Return the configured provider/model and in-process request counters."""
+    cfg = _load_config()
+    return {
+        "provider": get_llm_provider(),
+        "model": get_llm_settings()[1],
+        "requests": int(cfg.get("llm_usage_requests", 0) or 0),
+        "input_tokens": int(cfg.get("llm_usage_input_tokens", 0) or 0),
+        "output_tokens": int(cfg.get("llm_usage_output_tokens", 0) or 0),
+    }
 
 
 def ensure_ollama_running(timeout: int = 15) -> bool:
@@ -68,7 +94,7 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
     url, _   = get_llm_settings()
     provider = get_llm_provider()
 
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
         # OpenAI-compatible servers (LM Studio, LocalAI, etc.) must be started
         # by the user — we just check if they're reachable.
         health = f"{url}/v1/models"
@@ -146,7 +172,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": "hi"})
 
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
         # OpenAI-compatible: just fire a minimal request to ensure the model is loaded.
         # No keep_alive or KV-cache priming available — server manages this internally.
         payload = {
@@ -156,7 +182,8 @@ def warmup_model(system_prompt: str | None = None) -> bool:
             "max_tokens": 1,
         }
         try:
-            resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=180)
+            resp = requests.post(f"{url}/v1/chat/completions", json=payload,
+                                 headers=_openai_headers(), timeout=180)
             resp.raise_for_status()
             print(f"[LLM] '{model}' ready (OpenAI-compatible server).")
             return True
@@ -221,8 +248,11 @@ def check_model_available(log: Callable | None = None) -> bool:
 def get_llm_settings() -> tuple[str, str]:
     """Returns (base_url, model_name)."""
     cfg   = _load_config()
-    url   = cfg.get("llm_url",   _DEFAULTS["llm_url"]).rstrip("/")
-    model = cfg.get("llm_model", _DEFAULTS["llm_model"])
+    provider = get_llm_provider()
+    default_url = "https://openrouter.ai/api" if provider == "openrouter" else _DEFAULTS["llm_url"]
+    default_model = "openrouter/free" if provider == "openrouter" else _DEFAULTS["llm_model"]
+    url   = cfg.get("llm_url", default_url).rstrip("/")
+    model = cfg.get("llm_model", default_model)
     return url, model
 
 
@@ -240,7 +270,7 @@ def call_llm(
     url, model = get_llm_settings()
     provider   = get_llm_provider()
 
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
         endpoint = f"{url}/v1/chat/completions"
         payload: dict = {
             "model":      model,
@@ -252,7 +282,8 @@ def call_llm(
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
         try:
-            resp = requests.post(endpoint, json=payload, timeout=timeout)
+            resp = requests.post(endpoint, json=payload,
+                                 headers=_openai_headers(), timeout=timeout)
             resp.raise_for_status()
             choice = resp.json().get("choices", [{}])[0]
             msg    = choice.get("message", {})
@@ -501,7 +532,7 @@ def call_llm_stream(
     Tool calls always appear in the final "done" event.
     """
     provider = get_llm_provider()
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
         yield from _stream_openai(messages, tools, timeout)
         return
 
@@ -521,7 +552,8 @@ def call_llm_stream(
         payload["tools"] = tools
 
     def _do_stream() -> Generator[dict, None, None]:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with requests.post(endpoint, json=payload,
+                   headers=_openai_headers(), timeout=timeout, stream=True) as resp:
             resp.raise_for_status()
             full_content = ""
             tool_calls:  list = []

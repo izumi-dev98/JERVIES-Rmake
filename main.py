@@ -410,6 +410,9 @@ class JarvisLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
+        self.ui.on_api_key_change = lambda: self.request_reconnect(
+            keep_context=True, reason="new API key"
+        )
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -440,6 +443,7 @@ class JarvisLive:
         self._usage_input_tokens = 0
         self._usage_output_tokens = 0
         self._usage_total_tokens = 0
+        self._stopping = False
         _sync_all_memory_to_galaxy()
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
@@ -932,6 +936,14 @@ class JarvisLive:
                 else:
                     result = f"Unknown tool: {name}"
 
+        except RuntimeError as e:
+            if "executor" in str(e).lower() and "shutdown" in str(e).lower():
+                self._stopping = True
+                result = "JARVIS is shutting down."
+            else:
+                result = f"Tool '{name}' failed: {e}"
+                traceback.print_exc()
+                self.speak_error(name, e)
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
@@ -1437,7 +1449,7 @@ class JarvisLive:
 
     async def _run_system_monitor(self) -> None:
         """Background task: voice alerts when metrics exceed thresholds."""
-        while True:
+        while not self._stopping:
             await asyncio.sleep(10)
             alert = await asyncio.to_thread(self._sys_monitor.check)
             if not alert or not self.session or not self._awake:
@@ -1625,9 +1637,10 @@ class JarvisLive:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
 
-        while True:
+        while not self._stopping:
             try:
                 print("[JARVIS] Connecting...")
+                self.ui.set_connection_status("connecting")
                 self.ui.set_state("THINKING")
                 _resumed_with = self._resume_handle is not None
                 config = self._build_config()
@@ -1658,6 +1671,8 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
+                    self.ui.set_connection_status("connected")
+                    self.ui.set_active_model("gemini", LIVE_MODEL.rsplit("/", 1)[-1])
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -1667,10 +1682,17 @@ class JarvisLive:
                     # Wake word: if enabled, come up ASLEEP (mic gated, silent)
                     # until the user says "Hey Jarvis" or taps wake in the UI.
                     if self._wake_enabled:
-                        self._ensure_wake_detector()
-                        self._awake = False
-                        self.ui.set_state("SLEEPING")
-                        self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        if self._ensure_wake_detector():
+                            self._awake = False
+                            self.ui.set_state("SLEEPING")
+                            self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        else:
+                            # Wake word is optional. A broken local model must
+                            # never make the main microphone unusable.
+                            self._wake_enabled = False
+                            self._awake = True
+                            self.ui.set_state("LISTENING")
+                            self.ui.write_log("ERR: Wake word unavailable — microphone remains active.")
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")
@@ -1708,6 +1730,10 @@ class JarvisLive:
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
                 # start shutdown — resulting in "executor after shutdown" errors).
+                if "executor" in str(e).lower() and "shutdown" in str(e).lower():
+                    self._stopping = True
+                    print("[JARVIS] Executor is shutting down; stopping reconnect loop.")
+                    break
                 # Voluntary reconnect (voice change) — not an error. Rebuild the
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
@@ -1740,6 +1766,16 @@ class JarvisLive:
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
+
+                # Live can report optional preview-feature rejection as a
+                # generic 1008 policy close. Retry once without proactivity.
+                if self._enhanced_live and ("1008" in err_str or "policy violation" in err_str.lower()):
+                    self._enhanced_live = False
+                    self.ui.write_log(
+                        "NET: Live session rejected optional audio features — retrying in basic mode."
+                    )
+                    self._conn_backoff = 3
+                    continue
 
                 # Proactive audio rejected by the server (preview API drift) —
                 # drop it and reconnect with the plain config.
@@ -1783,15 +1819,18 @@ class JarvisLive:
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
-                if len(self._session_log) >= 3:
+                if len(self._session_log) >= 3 and not self._stopping:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
+            self.ui.set_connection_status("reconnecting")
             self.ui.set_state("SLEEPING")
 
             if self._dashboard:
                 await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
 
+            if self._stopping:
+                break
             delay = getattr(self, "_conn_backoff", 3)
             print(f"[JARVIS] Reconnecting in {delay}s...")
             await asyncio.sleep(delay)
