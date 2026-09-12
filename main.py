@@ -1056,6 +1056,19 @@ class JarvisLive:
             while True:
                 async for response in self.session.receive():
 
+                    # Gemini Live announces its maximum session lifetime with
+                    # GoAway before the socket becomes invalid. Reconnect now
+                    # while the TaskGroup can close the old session cleanly;
+                    # waiting for receive() to raise 1008 makes the server
+                    # report that the client failed to close in time.
+                    _go_away = getattr(response, "go_away", None)
+                    if _go_away is not None:
+                        _time_left = getattr(_go_away, "time_left", None) or "soon"
+                        self.ui.write_log(
+                            f"SYS: Gemini Live session ending in {_time_left} — reconnecting cleanly."
+                        )
+                        raise _ReconnectSignal(keep_context=True)
+
                     # ── Session resumption ───────────────────────────────────
                     # The server sends this periodically. `resumable` goes false
                     # while a turn is mid-flight — replaying a handle from that
