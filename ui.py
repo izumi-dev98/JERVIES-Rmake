@@ -9,6 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+import webbrowser
 from pathlib import Path
 
 import psutil
@@ -32,6 +35,11 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+except ImportError:
+    QWebEngineView = None
 
 # ── Which Mark this is ───────────────────────────────────────────────────────
 # One constant, read by the window title, the header badge and the PROTOCOL
@@ -387,6 +395,8 @@ class HudCanvas(QWidget):
         self.muted    = False
         self.speaking = False
         self.state    = "INITIALISING"
+        self.on_screen_wake = None
+        self._wake_hold_triggered = False
         self._assistant_name = assistant_name
 
         self._tick       = 0
@@ -425,6 +435,30 @@ class HudCanvas(QWidget):
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
+        self._wake_hold_tmr = QTimer(self)
+        self._wake_hold_tmr.setSingleShot(True)
+        self._wake_hold_tmr.setInterval(650)
+        self._wake_hold_tmr.timeout.connect(self._wake_from_screen)
+
+    def _wake_from_screen(self) -> None:
+        self._wake_hold_triggered = True
+        if self.on_screen_wake:
+            self.on_screen_wake()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._wake_hold_triggered = False
+            self._wake_hold_tmr.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._wake_hold_tmr.isActive():
+                self._wake_hold_tmr.stop()
+                self._wake_from_screen()
+            elif self._wake_hold_triggered:
+                self._wake_hold_triggered = False
+        super().mouseReleaseEvent(event)
 
     def set_audio_level(self, level: float) -> None:
         """Thread-safe entry point for the audio threads. Stores the louder of
@@ -708,6 +742,8 @@ class HudCanvas(QWidget):
         elif self.state == "LISTENING":
             sym = "●" if self._blink else "○"
             txt, col = f"{sym}  LISTENING",  qcol(C.GREEN)
+        elif self.state == "SLEEPING":
+            txt, col = "●  SLEEPING · TAP TO WAKE", qcol(C.PRI)
         else:
             sym = "●" if self._blink else "○"
             txt, col = f"{sym}  {self.state}", qcol(C.PRI)
@@ -2746,6 +2782,8 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _usage_sig      = pyqtSignal(str, str, str, str, str, str)
+    _workspace_sig  = pyqtSignal(str, str, str)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2781,11 +2819,13 @@ class MainWindow(QMainWindow):
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
+        self.on_wake_now       = None   # callable: () -> None — explicit wake only
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
         self._muted            = False
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
+        self._galaxy_process: subprocess.Popen | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -2805,6 +2845,7 @@ class MainWindow(QMainWindow):
 
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
+        self.hud.on_screen_wake = self._wake_from_screen
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._content_panel = self._build_content_panel()
 
@@ -2846,6 +2887,29 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack = QStackedWidget()
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
+        self._galaxy_view = None
+        self._galaxy_mode = False
+        if QWebEngineView is not None:
+            self._galaxy_view = QWebEngineView()
+            self._galaxy_view.setStyleSheet("background: #03050a;")
+            self._hud_cam_stack.addWidget(self._galaxy_view)
+        self._galaxy_bar = QWidget()
+        self._galaxy_bar.setFixedHeight(32)
+        self._galaxy_bar.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};")
+        galaxy_bar_layout = QHBoxLayout(self._galaxy_bar)
+        galaxy_bar_layout.setContentsMargins(8, 2, 8, 2)
+        galaxy_bar_title = QLabel("🌌  KNOWLEDGE GALAXY")
+        galaxy_bar_title.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        galaxy_bar_title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        galaxy_bar_layout.addWidget(galaxy_bar_title)
+        galaxy_bar_layout.addStretch()
+        galaxy_return = QPushButton("←  RETURN TO MARK LIII")
+        galaxy_return.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        galaxy_return.setCursor(Qt.CursorShape.PointingHandCursor)
+        galaxy_return.setStyleSheet(f"QPushButton {{ color: {C.TEXT}; background: transparent; border: 1px solid {C.BORDER}; padding: 3px 8px; }} QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI}; }}")
+        galaxy_return.clicked.connect(self._leave_galaxy)
+        galaxy_bar_layout.addWidget(galaxy_return)
+        self._galaxy_bar.hide()
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -2857,7 +2921,13 @@ class MainWindow(QMainWindow):
                 background: {C.PRI_DIM};
             }}
         """)
-        self._center_split.addWidget(self._hud_cam_stack)
+        center_surface = QWidget()
+        center_surface_layout = QVBoxLayout(center_surface)
+        center_surface_layout.setContentsMargins(0, 0, 0, 0)
+        center_surface_layout.setSpacing(0)
+        center_surface_layout.addWidget(self._galaxy_bar)
+        center_surface_layout.addWidget(self._hud_cam_stack, stretch=1)
+        self._center_split.addWidget(center_surface)
         self._center_split.addWidget(self._content_panel)
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
@@ -2898,6 +2968,8 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
+        self._usage_sig.connect(self._update_usage_panel)
+        self._workspace_sig.connect(self._update_workspace_panel)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3501,6 +3573,27 @@ class MainWindow(QMainWindow):
         lay.addLayout(right_col)
         return w
 
+    def _set_galaxy_mode(self, enabled: bool) -> None:
+        self._galaxy_mode = enabled
+        if enabled:
+            self._content_panel.hide()
+            self._galaxy_bar.show()
+            QTimer.singleShot(0, self._fill_galaxy_panel)
+        self._drawer_btn.setToolTip("Settings & Controls")
+
+    def _fill_galaxy_panel(self) -> None:
+        if not self._galaxy_mode:
+            return
+        self._center_split.setSizes([self._center_split.height(), 0])
+
+    def _leave_galaxy(self) -> None:
+        self._galaxy_mode = False
+        self._galaxy_bar.hide()
+        self._hud_cam_stack.setCurrentWidget(self.hud)
+        self._content_panel.show()
+        QTimer.singleShot(0, lambda: self._center_split.setSizes(
+            [max(self._center_split.height() - 220, 120), 220]))
+
     def _tick_clock(self):
         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
@@ -3559,6 +3652,70 @@ class MainWindow(QMainWindow):
         lay.addWidget(info_panel)
         lay.addSpacing(4)
 
+        usage_panel = QWidget()
+        usage_panel.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+        )
+        usage_lay = QVBoxLayout(usage_panel)
+        usage_lay.setContentsMargins(6, 5, 6, 5)
+        usage_lay.setSpacing(3)
+        usage_title = QLabel("AI MODEL USAGE")
+        usage_title.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        usage_title.setStyleSheet(f"color: {C.PRI}; background: transparent; border: none;")
+        usage_lay.addWidget(usage_title)
+        self._usage_model_lbl = QLabel("MODEL  --")
+        self._usage_turns_lbl = QLabel("TURNS  0   TOOLS  0")
+        self._usage_tokens_lbl = QLabel("TOKENS  IN -- / OUT --")
+        self._usage_total_lbl = QLabel("TOTAL  --")
+        for label in [self._usage_model_lbl, self._usage_turns_lbl,
+                      self._usage_tokens_lbl, self._usage_total_lbl]:
+            label.setFont(QFont("Courier New", 7))
+            label.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+            usage_lay.addWidget(label)
+        lay.addWidget(usage_panel)
+        lay.addSpacing(4)
+
+        workspace_panel = QWidget()
+        workspace_panel.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+        )
+        workspace_lay = QVBoxLayout(workspace_panel)
+        workspace_lay.setContentsMargins(6, 5, 6, 5)
+        workspace_lay.setSpacing(3)
+        workspace_title = QLabel("CURRENT WORKSPACE")
+        workspace_title.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        workspace_title.setStyleSheet(f"color: {C.PRI}; background: transparent; border: none;")
+        workspace_lay.addWidget(workspace_title)
+        self._workspace_path_lbl = QLabel("MARK LIII  READY")
+        self._workspace_path_lbl.setWordWrap(True)
+        self._workspace_path_lbl.setFont(QFont("Courier New", 7))
+        self._workspace_path_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        workspace_lay.addWidget(self._workspace_path_lbl)
+        self._workspace_views_lbl = QLabel("VIEWS  --")
+        self._workspace_views_lbl.setFont(QFont("Courier New", 7))
+        self._workspace_views_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        workspace_lay.addWidget(self._workspace_views_lbl)
+        lay.addWidget(workspace_panel)
+        lay.addSpacing(4)
+
+        galaxy_btn = QPushButton("🌌  GALAXY VIEW")
+        galaxy_btn.setFixedHeight(30)
+        galaxy_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        galaxy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        galaxy_btn.setToolTip("Open the interactive 3D knowledge galaxy")
+        galaxy_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.ACC2}; background: {C.PANEL2};
+                border: 1px solid {C.BORDER_A}; border-radius: 3px;
+                padding: 3px;
+            }}
+            QPushButton:hover {{ color: {C.WHITE}; border-color: {C.ACC2};
+                background: {C.PRI_GHO}; }}
+        """)
+        galaxy_btn.clicked.connect(self._open_galaxy)
+        lay.addWidget(galaxy_btn)
+        lay.addSpacing(4)
+
         lay.addStretch()
 
         for txt, col in [
@@ -3576,6 +3733,73 @@ class MainWindow(QMainWindow):
             lay.addWidget(lbl)
 
         return w
+
+    def _update_usage_panel(self, model, turns, tools, input_tokens, output_tokens, total_tokens):
+        self._usage_model_lbl.setText(f"MODEL  {model}")
+        self._usage_turns_lbl.setText(f"TURNS  {turns}   TOOLS  {tools}")
+        self._usage_tokens_lbl.setText(f"TOKENS  IN {input_tokens} / OUT {output_tokens}")
+        self._usage_total_lbl.setText(f"TOTAL  {total_tokens}")
+
+    def _update_workspace_panel(self, path, views, errors):
+        self._workspace_path_lbl.setText(f"MARK LIII  {path}")
+        self._workspace_views_lbl.setText(
+            "VIEWS  " + (" + ".join(views.split("|")) if views else "NONE")
+            + ("  · ERROR" if errors else "")
+        )
+
+    def _open_galaxy(self) -> None:
+        """Start the note galaxy server and show it inside the MARK window."""
+        url = "http://127.0.0.1:4700"
+
+        def show_view() -> None:
+            if self._galaxy_view is None:
+                webbrowser.open(url)
+                return
+            self._galaxy_view.setUrl(QUrl(url))
+            self._hud_cam_stack.setCurrentWidget(self._galaxy_view)
+            self._set_galaxy_mode(True)
+
+        def wait_for_server(attempts=0) -> None:
+            try:
+                with urllib.request.urlopen(url, timeout=0.25):
+                    show_view()
+                    return
+            except (urllib.error.URLError, TimeoutError, OSError):
+                if attempts < 20:
+                    QTimer.singleShot(250, lambda: wait_for_server(attempts + 1))
+                else:
+                    self._log_sig.emit("SYS: Galaxy View server did not start.")
+
+        try:
+            with urllib.request.urlopen(url, timeout=0.25):
+                show_view()
+                return
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+
+        server = BASE_DIR / "server.py"
+        if not server.is_file():
+            return
+        if self._galaxy_process is not None and self._galaxy_process.poll() is None:
+            wait_for_server()
+            return
+        try:
+            self._galaxy_process = subprocess.Popen(
+                [sys.executable, str(server)],
+                cwd=str(BASE_DIR),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_WIN_HIDE,
+            )
+        except OSError:
+            self._log_sig.emit("SYS: Could not start Galaxy View server.")
+            return
+        wait_for_server()
+
+    def closeEvent(self, event) -> None:
+        if self._galaxy_process is not None and self._galaxy_process.poll() is None:
+            self._galaxy_process.terminate()
+        super().closeEvent(event)
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
@@ -3788,6 +4012,11 @@ class MainWindow(QMainWindow):
         return w
 
     def _toggle_drawer(self, checked: bool):
+        if self._galaxy_mode:
+            self._leave_galaxy()
+            self._drawer_btn.setChecked(False)
+            self._drawer_btn.setToolTip("Settings & Controls")
+            return
         if checked:
             self._refresh_wake_btns()   # resolve wake state on open (lazy)
             self._position_quick_drawer()
@@ -4162,7 +4391,7 @@ class MainWindow(QMainWindow):
             self._wake_btn.setText("🎙  WAKE WORD: ON")
             self._wake_btn.setStyleSheet(_on)
             self._wake_sleep_btn.show()
-            self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👂  WAKE NOW")
+            self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👆  CLICK TO WAKE")
             self._wake_sleep_btn.setStyleSheet(_off)
         else:
             self._wake_btn.setText("🎙  WAKE WORD: OFF")
@@ -4206,6 +4435,14 @@ class MainWindow(QMainWindow):
         if self.on_wake_manual:
             try:
                 self.on_wake_manual()
+            except Exception:
+                pass
+        self._refresh_wake_btns()
+
+    def _wake_from_screen(self):
+        if self.on_wake_now:
+            try:
+                self.on_wake_now("screen tap")
             except Exception:
                 pass
         self._refresh_wake_btns()
@@ -4626,6 +4863,14 @@ class JarvisUI:
         self._win.on_wake_manual = cb
 
     @property
+    def on_wake_now(self):
+        return self._win.on_wake_now
+
+    @on_wake_now.setter
+    def on_wake_now(self, cb):
+        self._win.on_wake_now = cb
+
+    @property
     def wake_get_state(self):
         return self._win.wake_get_state
 
@@ -4650,6 +4895,10 @@ class JarvisUI:
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
+
+    def show_workspace_status(self, path: str, views: list[str], errors: list[str]) -> None:
+        """Thread-safe: reflect the last workspace-open request in the UI."""
+        self._win._workspace_sig.emit(path, "|".join(views), "|".join(errors))
 
     def wait_for_api_key(self):
         while not self._win._ready:

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JARVIS // KNOWLEDGE GALAXY</title>
+  <style>
+    :root { --ink:#d8f8ff; --muted:#3a8a9a; --line:#0d3347; --cyan:#00d4ff; --gold:#ffcc00; --panel:#010f18; }
+    * { box-sizing:border-box; }
+    body { margin:0; overflow:hidden; color:var(--ink); background:#00060a; font-family:'Courier New',monospace; }
+    body:before { content:''; position:fixed; inset:0; pointer-events:none; opacity:.38; background-image:radial-gradient(#00d4ff 1px,transparent 1px),linear-gradient(90deg,transparent 49.8%,rgba(0,212,255,.11) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(0,212,255,.11) 50%,transparent 50.2%); background-size:83px 83px,100% 100%,100% 100%; }
+    #graph { position:fixed; inset:0; }
+    .hud { position:fixed; z-index:2; inset:0; pointer-events:none; padding:12px 16px; display:flex; justify-content:space-between; border:1px solid var(--line); }
+    .brand { pointer-events:auto; letter-spacing:.15em; text-transform:uppercase; font:10px 'Courier New',monospace; color:var(--cyan); }
+    .brand strong { display:block; color:var(--cyan); font:bold 20px 'Courier New',monospace; letter-spacing:.08em; text-transform:uppercase; }
+    .stats { pointer-events:auto; text-align:right; color:var(--muted); font:10px 'Courier New',monospace; line-height:1.8; }
+    .voice { pointer-events:auto; position:absolute; top:12px; left:50%; transform:translateX(-50%); color:var(--cyan); padding:6px 12px; border:1px solid var(--line); background:rgba(1,15,24,.9); font:10px 'Courier New',monospace; letter-spacing:.1em; }
+    .voice:before { content:'●'; margin-right:8px; color:#7dffa6; animation:pulse 1.8s infinite; }
+    .voice { animation:signal 3s ease-in-out infinite; }
+    .legend { pointer-events:auto; position:absolute; left:16px; bottom:18px; padding:9px 11px; border:1px solid var(--line); background:rgba(1,15,24,.82); color:var(--muted); font:10px 'Courier New',monospace; line-height:1.8; }
+    .legend strong { color:var(--cyan); font-weight:500; }
+    .legend button { padding:3px 7px; margin-left:8px; color:var(--cyan); background:transparent; border:1px solid var(--line); font:10px 'Courier New',monospace; }
+    .legend button:hover { border-color:var(--cyan); color:var(--ink); }
+    .toolbar { pointer-events:auto; position:absolute; top:84px; left:16px; display:flex; gap:6px; padding:6px; border:1px solid var(--line); background:rgba(1,15,24,.84); }
+    .toolbar button { padding:6px 8px; color:var(--muted); background:transparent; border:1px solid var(--line); font:10px 'Courier New',monospace; }
+    .toolbar button:hover { color:var(--cyan); border-color:var(--cyan); }
+    @keyframes pulse { 50% { opacity:.35; } }
+    .expand { pointer-events:auto; margin-top:10px; padding:7px 10px; color:var(--cyan); background:rgba(5,10,19,.82); border:1px solid var(--line); font:10px 'DM Mono',monospace; cursor:pointer; }
+    .expand:hover { border-color:var(--cyan); color:var(--ink); }
+    .panel { pointer-events:auto; position:absolute; top:84px; right:16px; width:min(340px,calc(100vw - 32px)); padding:16px; border:1px solid var(--line); background:rgba(1,15,24,.94); box-shadow:0 0 35px #001522; transform:translateX(120%); transition:transform .5s cubic-bezier(.2,.8,.2,1); }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .close-note { padding:4px 7px; color:var(--muted); background:transparent; border:1px solid var(--line); font:10px 'Courier New',monospace; cursor:pointer; }
+    .close-note:hover { color:var(--cyan); border-color:var(--cyan); }
+    .panel.open { transform:none; }
+    .kicker { color:var(--gold); font:11px 'DM Mono',monospace; text-transform:uppercase; letter-spacing:.12em; }
+    h1 { margin:8px 0 14px; font-size:25px; font-weight:500; }
+    #excerpt { color:#bdcbdc; font-size:14px; line-height:1.65; }
+    .related-head { margin-top:18px; padding-top:10px; border-top:1px solid var(--line); color:var(--cyan); font:10px 'Courier New',monospace; letter-spacing:.12em; }
+    #related-list { display:grid; gap:5px; margin-top:8px; max-height:150px; overflow:auto; }
+    .related-item { display:flex; align-items:center; gap:7px; padding:5px 6px; color:var(--ink); background:rgba(13,51,71,.28); font:11px 'Courier New',monospace; cursor:pointer; }
+    .related-item:hover { background:rgba(13,51,71,.65); }
+    .related-dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%; box-shadow:0 0 8px currentColor; }
+    @keyframes signal { 50% { box-shadow:0 0 18px rgba(0,212,255,.2); } }
+    .chat { pointer-events:auto; position:absolute; left:50%; bottom:18px; transform:translateX(-50%); width:min(680px,calc(100vw - 40px)); }
+    body.expanded .panel { right:28px; }
+    body.expanded .brand { opacity:.72; }
+    body.expanded .chat { bottom:22px; }
+    form { display:flex; border:1px solid rgba(110,231,255,.38); background:rgba(5,10,19,.88); box-shadow:0 0 45px #071522; }
+    input { min-width:0; flex:1; border:0; outline:0; padding:16px 18px; color:var(--ink); background:transparent; font:14px 'Space Grotesk',sans-serif; }
+    button { border:0; border-left:1px solid var(--line); padding:0 19px; color:#061018; background:var(--cyan); font:500 12px 'DM Mono',monospace; cursor:pointer; text-transform:uppercase; }
+    #answer { display:none; margin-bottom:10px; padding:14px 17px; border-left:2px solid var(--gold); background:rgba(5,10,19,.9); color:#dce8f4; font-size:14px; line-height:1.5; }
+    #answer.visible { display:block; }
+    @media (max-width:600px) { .hud { padding:18px; } .brand strong { font-size:21px; } .stats { font-size:10px; } .panel { top:85px; right:18px; } .chat { bottom:18px; width:calc(100vw - 36px); } }
+  </style>
+</head>
+<body>
+  <div id="graph"></div>
+  <main class="hud">
+    <div class="brand"><strong>JARVIS</strong>KNOWLEDGE GALAXY // MARK LIII</div>
+    <div class="voice">MARK LIII // VOICE ONLINE</div>
+    <div class="stats"><span id="node-count">00</span> NOTES<br><span id="link-count">00</span> CONNECTIONS<br><button class="expand" id="expand">FULL GALAXY</button></div>
+    <div class="toolbar"><button id="reset">RESET VIEW</button><button id="focus">FOCUS LINKS</button></div>
+    <div class="legend"><strong>RELATED NOTES</strong><br><span id="focus-status">Select a note to trace its links.</span><br><button id="motion">MOTION: ON</button></div>
+    <aside class="panel" id="panel"><div class="panel-head"><div class="kicker" id="group">NOTE</div><button class="close-note" id="close-note">CLOSE</button></div><h1 id="title"></h1><div id="excerpt"></div><div class="related-head">CONNECTED NOTES</div><div id="related-list"></div></aside>
+    <section class="chat"><div id="answer"></div><form id="chat-form"><input id="question" autocomplete="off" placeholder="Ask your notes a question..." aria-label="Ask your notes a question"><button>Ask</button></form></section>
+  </main>
+  <script src="https://unpkg.com/3d-force-graph"></script>
+  <script src="graph-data.js"></script>
+  <script>
+    const colors = ['#6ee7ff','#ffc36b','#cf9cff','#7dffa6','#ff8fa3','#9bb8ff'];
+    const groupColor = new Map([...new Set(GRAPH.nodes.map(n => n.group))].map((group, i) => [group, colors[i % colors.length]]));
+    let selected = new Set();
+    const linkNode = endpoint => typeof endpoint === 'object' ? endpoint : GRAPH.nodes[endpoint];
+    const graph = ForceGraph3D()(document.getElementById('graph')).backgroundColor('rgba(0,0,0,0)')
+      .showNavInfo(false).nodeLabel(n => `<b>${n.label}</b><br><small>${n.group}</small>`)
+      .nodeColor(n => groupColor.get(n.group)).nodeVal(3.5)
+      .linkColor(link => groupColor.get(linkNode(link.source)?.group) || '#527184')
+      .linkOpacity(0.34).linkWidth(link => selected.has(linkNode(link.source)?.id) || selected.has(linkNode(link.target)?.id) ? 2.4 : 0.5)
+      .linkDirectionalParticles(link => selected.has(linkNode(link.source)?.id) || selected.has(linkNode(link.target)?.id) ? 3 : 1)
+      .linkDirectionalParticleWidth(1.2)
+      .graphData(GRAPH).onNodeClick(node => selectNode(node));
+    graph.d3Force('charge').strength(-95);
+    graph.d3Force('link').distance(80);
+    graph.cameraPosition({x:0,y:0,z:850});
+    document.getElementById('node-count').textContent = String(GRAPH.nodes.length).padStart(2,'0');
+    document.getElementById('link-count').textContent = String(GRAPH.links.length).padStart(2,'0');
+    let motion = true;
+    document.getElementById('motion').addEventListener('click', event => {
+      motion = !motion;
+      event.currentTarget.textContent = `MOTION: ${motion ? 'ON' : 'OFF'}`;
+      graph.linkDirectionalParticles(motion ? 2 : 0);
+    });
+    document.getElementById('close-note').addEventListener('click', () => document.getElementById('panel').classList.remove('open'));
+    document.getElementById('reset').addEventListener('click', () => {
+      selected = new Set();
+      graph.nodeColor(n => groupColor.get(n.group)).nodeVal(3.5)
+        .linkWidth(0.5).linkDirectionalParticles(motion ? 1 : 0);
+      document.getElementById('focus-status').textContent = 'Select a note to trace its links.';
+      document.getElementById('related-list').replaceChildren();
+      document.getElementById('panel').classList.remove('open');
+      graph.cameraPosition({x:0,y:0,z:850}, null, 900);
+    });
+    document.getElementById('focus').addEventListener('click', () => {
+      const node = GRAPH.nodes.find(item => selected.has(item.id));
+      if (node) focusNode(node);
+    });
+    document.getElementById('expand').addEventListener('click', event => {
+      document.body.classList.toggle('expanded');
+      const expanded = document.body.classList.contains('expanded');
+      event.currentTarget.textContent = expanded ? 'GALAXY VIEW' : 'FULL GALAXY';
+      if (expanded && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+      if (!expanded && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    });
+    function selectNode(node) {
+      selected = new Set([node.id]);
+      GRAPH.links.forEach(link => {
+        const source = linkNode(link.source); const target = linkNode(link.target);
+        if (source?.id === node.id) selected.add(target?.id);
+        if (target?.id === node.id) selected.add(source?.id);
+      });
+      graph.nodeColor(n => selected.has(n.id) ? groupColor.get(n.group) : '#1c2a3a').nodeVal(n => selected.has(n.id) ? 6 : 2.2)
+        .linkWidth(link => selected.has(linkNode(link.source)?.id) || selected.has(linkNode(link.target)?.id) ? 2.4 : 0.5)
+        .linkDirectionalParticles(link => motion && (selected.has(linkNode(link.source)?.id) || selected.has(linkNode(link.target)?.id)) ? 4 : 0);
+      document.getElementById('focus-status').textContent = `${node.label} + ${selected.size - 1} related note${selected.size === 2 ? '' : 's'}`;
+      const related = GRAPH.nodes.filter(item => item.id !== node.id && selected.has(item.id));
+      const list = document.getElementById('related-list');
+      list.replaceChildren(...related.map(item => {
+        const row = document.createElement('div');
+        row.className = 'related-item';
+        row.innerHTML = `<span class="related-dot" style="color:${groupColor.get(item.group)};background:${groupColor.get(item.group)}"></span><span>${item.label}</span>`;
+        row.addEventListener('click', () => selectNode(item));
+        return row;
+      }));
+      focusNode(node);
+      document.getElementById('group').textContent = node.group.toUpperCase(); document.getElementById('title').textContent = node.label; document.getElementById('excerpt').textContent = node.excerpt; document.getElementById('panel').classList.add('open');
+    }
+    function focusNode(node) {
+      const distance = 110; const ratio = 1 + distance / Math.hypot(node.x || 1, node.y || 1, node.z || 1);
+      graph.cameraPosition({x:(node.x || 0)*ratio,y:(node.y || 0)*ratio,z:(node.z || 0)*ratio}, node, 1300);
+    }
+    document.getElementById('chat-form').addEventListener('submit', async event => {
+      event.preventDefault(); const input = document.getElementById('question'); const question = input.value.trim(); if (!question) return;
+      const answer = document.getElementById('answer'); answer.textContent = 'Consulting the galaxy...'; answer.classList.add('visible'); input.disabled = true;
+      try { const response = await fetch('/chat', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({question,session:'browser'})}); const data = await response.json(); answer.textContent = data.answer || data.error; if (data.nodes?.length) selectNode(GRAPH.nodes[data.nodes[0]]); } catch (error) { answer.textContent = 'The local server is unavailable.'; } finally { input.disabled = false; input.focus(); }
+    });
+  </script>
+</body>
+</html>

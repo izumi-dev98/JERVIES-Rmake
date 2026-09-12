@@ -80,6 +80,101 @@ def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
     name = f"{src.stem}_{suffix}{ext}"
     return src.parent / name
 
+
+def _save_to_galaxy(path: Path) -> str:
+    """Save readable uploaded content as a Markdown node in Galaxy View."""
+    file_type = _detect_type(path)
+
+    try:
+        if file_type == "docx":
+            from docx import Document
+            content = "\n".join(paragraph.text for paragraph in Document(path).paragraphs)
+        elif file_type == "pdf":
+            from pypdf import PdfReader
+            content = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+        elif file_type == "excel":
+            from openpyxl import load_workbook
+            workbook = load_workbook(path, read_only=True, data_only=True)
+            sections = []
+            for sheet in workbook.worksheets:
+                rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+                rows = [["" if value is None else str(value) for value in row] for row in rows]
+                while rows and not any(rows[-1]):
+                    rows.pop()
+                if not rows:
+                    continue
+                width = max(len(row) for row in rows)
+                rows = [row + [""] * (width - len(row)) for row in rows]
+                header, *body = rows
+                table = [
+                    f"| {' | '.join(header)} |",
+                    f"| {' | '.join('---' for _ in header)} |",
+                    *[f"| {' | '.join(row)} |" for row in body],
+                ]
+                sections.append(f"## {sheet.title}\n\n" + "\n".join(table))
+            workbook.close()
+            content = "\n\n".join(sections)
+        elif file_type == "csv":
+            import csv
+            with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as stream:
+                rows = list(csv.reader(stream))
+            if rows:
+                width = max(len(row) for row in rows)
+                rows = [row + [""] * (width - len(row)) for row in rows]
+                header, *body = rows
+                content = "\n".join([
+                    f"| {' | '.join(header)} |",
+                    f"| {' | '.join('---' for _ in header)} |",
+                    *[f"| {' | '.join(row)} |" for row in body],
+                ])
+            else:
+                content = ""
+        elif file_type == "json":
+            content = "```json\n" + json.dumps(
+                json.loads(path.read_text(encoding="utf-8")), indent=2, ensure_ascii=False
+            ) + "\n```"
+        elif file_type == "pptx":
+            from pptx import Presentation
+            slides = []
+            for number, slide in enumerate(Presentation(path).slides, 1):
+                text = "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
+                slides.append(f"## Slide {number}\n\n{text}")
+            content = "\n\n".join(slides)
+        elif file_type in {"image", "audio", "video", "archive"}:
+            return (
+                f"{path.name} is a {file_type} file and needs extraction first. "
+                f"Ask: 'Analyze {path.name}, then save the result to Galaxy.'"
+            )
+        else:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+    except ImportError as error:
+        return (
+            f"Cannot convert {path.name}: missing {error.name}. "
+            "Install with: python -m pip install pandas openpyxl tabulate"
+        )
+    except Exception as error:
+        return f"Could not read {path.name}: {error}"
+
+    content = content.strip()
+    if not content:
+        return f"{path.name} has no readable text to save."
+
+    root = Path(__file__).resolve().parent.parent
+    safe_name = re.sub(r"[^a-z0-9_-]+", "-", path.stem.lower()).strip("-") or "uploaded-file"
+    note_path = root / "notes" / "jarvis-memory" / "uploads" / f"{safe_name}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        f"# {path.stem}\n\nSource file: {path.name}\n\n{content[:50000]}\n",
+        encoding="utf-8",
+    )
+    from build import build
+    graph = build()
+    (root / "viewer" / "graph-data.js").write_text(
+        "const GRAPH = " + json.dumps(graph, ensure_ascii=True, separators=(",", ":")) + ";\n",
+        encoding="utf-8",
+    )
+    return f"Saved {path.name} to Galaxy View as {note_path.name}."
+
 def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
     try:
         from PIL import Image
@@ -797,6 +892,9 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     if player:
         player.write_log(log_msg)
 
+    if action in {"save_to_galaxy", "save_galaxy", "save_note", "galaxy_note"}:
+        return _save_to_galaxy(path)
+
     if file_type == "unknown":
         try:
             content = path.read_text(encoding="utf-8", errors="ignore")[:10000]
@@ -839,7 +937,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_processor",
-    "description": "Processes any file that the user has uploaded or dropped onto the interface. Use this when the user refers to an uploaded file and wants an action on it. Supports: images (describe/ocr/resize/compress/convert), PDFs (summarize/extract_text/to_word), Word docs & text files (summarize/fix/reformat/translate), CSV/Excel (analyze/stats/filter/sort/convert), JSON/XML (validate/format/analyze), code files (explain/review/fix/optimize/run/document/test), audio (transcribe/trim/convert/info), video (trim/extract_audio/extract_frame/compress/transcribe/info), archives (list/extract), presentations (summarize/extract_text). ALWAYS call this tool when a file has been uploaded and the user gives a command about it. If the user's command is ambiguous, pick the most logical action for that file type.",
+    "description": "Processes an uploaded or dropped file. Use save_to_galaxy only when the user explicitly asks to save file data as a Galaxy note. Do not use this tool to open Galaxy View; use open_galaxy_view for that UI command. Supports saving readable uploaded files to Galaxy View plus image, PDF, Word, text, CSV/Excel, JSON/XML, code, audio, video, archive, and presentation processing.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -849,7 +947,7 @@ TOOL = {
             },
             "action": {
                 "type": "STRING",
-                "description": "What to do with the file. Examples by type:\nimage: describe | ocr | resize | compress | convert | info\npdf: summarize | extract_text | to_word | info\ndocx/txt: summarize | fix | reformat | translate_hint | word_count | to_bullet\ncsv/excel: analyze | stats | filter | sort | convert | info\njson: validate | format | analyze | to_csv\ncode: explain | review | fix | optimize | run | document | test\naudio: transcribe | trim | convert | info\nvideo: trim | extract_audio | extract_frame | compress | transcribe | info | convert\narchive: list | extract\npptx: summarize | extract_text | analyze"
+                "description": "What to do with the file. Use save_to_galaxy to save readable file data as a Galaxy note. Examples by type:\nimage: describe | ocr | resize | compress | convert | info\npdf: summarize | extract_text | to_word | info\ndocx/txt: summarize | fix | reformat | translate_hint | word_count | to_bullet\ncsv/excel: analyze | stats | filter | sort | convert | info\njson: validate | format | analyze | to_csv\ncode: explain | review | fix | optimize | run | document | test\naudio: transcribe | trim | convert | info\nvideo: trim | extract_audio | extract_frame | compress | transcribe | info | convert\narchive: list | extract\npptx: summarize | extract_text | analyze"
             },
             "instruction": {
                 "type": "STRING",

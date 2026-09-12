@@ -711,7 +711,7 @@ def file_controller(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages desktop files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage. For Galaxy Notes or Galaxy View searches, use search_galaxy_notes instead of searching the desktop.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

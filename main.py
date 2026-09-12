@@ -80,10 +80,6 @@ from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
 
-# How long the assistant stays awake with no user speech before it auto-sleeps
-# again (wake-word mode only).
-WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
-
 def get_base_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -103,6 +99,49 @@ CHUNK_SIZE          = 1024
 # the bars still move for a quiet talker — language- and device-independent.
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
+
+
+def _sync_memory_to_galaxy(category: str, key: str, value: str) -> None:
+    try:
+        safe_category = re.sub(r"[^a-z0-9_-]+", "-", str(category).lower()).strip("-") or "notes"
+        safe_key = re.sub(r"[^a-z0-9_-]+", "-", str(key).lower()).strip("-")
+        if not safe_key:
+            return
+        notes_dir = BASE_DIR / "notes" / "jarvis-memory"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        note_path = notes_dir / f"{safe_category}--{safe_key}.md"
+        note_path.write_text(
+            f"# {key}\n\nCategory: {category}\n\n{value}\n",
+            encoding="utf-8",
+        )
+        from build import build
+        graph = build()
+        (BASE_DIR / "viewer" / "graph-data.js").write_text(
+            "const GRAPH = " + json.dumps(
+                graph, ensure_ascii=True, separators=(",", ":")
+            ) + ";\n",
+            encoding="utf-8",
+        )
+    except Exception as error:
+        print(f"[Galaxy] Could not sync memory note: {error}")
+
+
+def _sync_all_memory_to_galaxy() -> None:
+    """Export existing structured memory entries so Galaxy is complete on launch."""
+    try:
+        memory = load_memory()
+        for category, entries in memory.items():
+            if not isinstance(entries, dict):
+                continue
+            for key, entry in entries.items():
+                if isinstance(entry, dict):
+                    value = entry.get("value", "")
+                else:
+                    value = entry
+                if value:
+                    _sync_memory_to_galaxy(category, key, str(value))
+    except Exception as error:
+        print(f"[Galaxy] Could not sync existing memory: {error}")
 
 
 def _pcm_level(samples) -> float:
@@ -396,6 +435,12 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        self._usage_turns = 0
+        self._usage_tools = 0
+        self._usage_input_tokens = 0
+        self._usage_output_tokens = 0
+        self._usage_total_tokens = 0
+        _sync_all_memory_to_galaxy()
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
 
@@ -428,12 +473,12 @@ class JarvisLive:
         self._wake_enabled     = get_wake_word_enabled()
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
-        self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
         # UI control surface for the Wake Word settings section.
         self.ui.wake_is_ready    = wake_is_ready          # () -> bool
         self.ui.wake_get_state   = self._wake_state       # () -> dict
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
+        self.ui.on_wake_now      = self.wake               # () -> wake only
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
 
     # ── Wake word: state machine ─────────────────────────────────────────────
@@ -468,26 +513,23 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
 
+    def _wake_from_screen(self) -> None:
+        self.wake(reason="screen tap")
+
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
             return
         self._awake = False
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
-        self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
+        self.ui.write_log(
+            f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' or click WAKE NOW to wake me."
+        )
 
     async def _run_sleep_watch(self) -> None:
-        """Auto-sleep after the configured silence window (wake-word mode only)."""
+        """Legacy watcher retained for compatibility; automatic sleep is disabled."""
         while True:
             await asyncio.sleep(5)
-            if not self._wake_enabled or not self._awake:
-                continue
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking:
-                continue
-            if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
-                self.sleep(reason="no speech for 2 minutes")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -615,7 +657,7 @@ class JarvisLive:
         # asleep either (the sleep gate is not just for the mic). Wake first with
         # "Hey Jarvis" or the WAKE NOW button.
         if self._wake_enabled and not self._awake:
-            self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
+            self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or click WAKE NOW first.")
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
@@ -765,6 +807,7 @@ class JarvisLive:
             value    = args.get("value", "")
             if key and value:
                 update_memory({category: {key: {"value": value}}})
+                _sync_memory_to_galaxy(category, key, value)
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
@@ -1027,6 +1070,26 @@ class JarvisLive:
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
 
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage is not None:
+                        self._usage_input_tokens = int(
+                            getattr(usage, "prompt_token_count", 0) or 0
+                        )
+                        self._usage_output_tokens = int(
+                            getattr(usage, "response_token_count", 0) or 0
+                        )
+                        self._usage_total_tokens = int(
+                            getattr(usage, "total_token_count", 0) or 0
+                        )
+                        self.ui._win._usage_sig.emit(
+                            LIVE_MODEL.rsplit("/", 1)[-1],
+                            str(self._usage_turns),
+                            str(self._usage_tools),
+                            f"{self._usage_input_tokens:,}",
+                            f"{self._usage_output_tokens:,}",
+                            f"{self._usage_total_tokens:,}",
+                        )
+
                     if response.server_content:
                         sc = response.server_content
 
@@ -1075,6 +1138,12 @@ class JarvisLive:
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                            self._usage_turns += 1
+                            self.ui._win._usage_sig.emit(
+                                LIVE_MODEL.rsplit("/", 1)[-1], str(self._usage_turns),
+                                str(self._usage_tools), f"{self._usage_input_tokens:,}",
+                                f"{self._usage_output_tokens:,}", f"{self._usage_total_tokens:,}",
+                            )
                             out_buf = []
 
                             # Vision injection: model finished tool-response turn → now send the image
@@ -1111,6 +1180,7 @@ class JarvisLive:
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
+                            self._usage_tools += 1
                             print(f"[JARVIS] 📞 {fc.name}")
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
@@ -1618,7 +1688,6 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
-                    tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
