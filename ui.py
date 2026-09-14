@@ -1862,6 +1862,71 @@ class PluginManagerOverlay(QWidget):
         self._style_toggle(btn, new_val)
 
 
+class PermissionOverlay(QWidget):
+    """Native editor for the local action permission policy."""
+
+    _OW = 520
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            PermissionOverlay {{ background: rgba(0, 6, 10, 246);
+                border: 1px solid {C.BORDER_B}; border-radius: 6px; }}
+        """)
+        self.setFixedWidth(self._OW)
+        self._boxes: dict[str, QComboBox] = {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(7)
+
+        title = QLabel("▣  ACTION PERMISSIONS")
+        title.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        lay.addWidget(title)
+        note = QLabel("Choose what MARK LIII may do automatically. Confirm still asks on the HUD.")
+        note.setWordWrap(True)
+        note.setFont(QFont("Courier New", 8))
+        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(note)
+
+        from core.permissions import LEVELS, policy_view
+        current = policy_view(API_FILE)
+        for action, level in current.items():
+            row = QHBoxLayout()
+            label = QLabel(action.replace("_", " ").upper())
+            label.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            label.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            row.addWidget(label, 1)
+            box = QComboBox()
+            box.addItems(list(LEVELS))
+            box.setCurrentText(level)
+            box.setToolTip("safe: run automatically; confirm: ask on HUD; blocked: refuse")
+            self._boxes[action] = box
+            row.addWidget(box)
+            lay.addLayout(row)
+
+        buttons = QHBoxLayout()
+        save = QPushButton("▸  SAVE PERMISSIONS")
+        save.setFixedHeight(32)
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        close = QPushButton("CLOSE")
+        close.setFixedHeight(32)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(self.hide)
+        buttons.addWidget(close)
+        lay.addLayout(buttons)
+        self.adjustSize()
+
+    def _save(self):
+        from core.permissions import save_level
+        for action, box in self._boxes.items():
+            save_level(API_FILE, action, box.currentText())
+        self.hide()
+
+
 class _HudOverlay(QWidget):
     """Base for the floating panels placed by hand over the HUD.
 
@@ -4184,6 +4249,14 @@ class MainWindow(QMainWindow):
         plugin_btn.clicked.connect(self._open_plugin_manager)
         lay.addWidget(plugin_btn)
 
+        permission_btn = QPushButton("▣  PERMISSIONS")
+        permission_btn.setFixedHeight(26)
+        permission_btn.setFont(QFont("Courier New", 7))
+        permission_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        permission_btn.setStyleSheet(_BTN_STYLE_DIM)
+        permission_btn.clicked.connect(self._open_permissions)
+        lay.addWidget(permission_btn)
+
         settings_btn = QPushButton("⚙  PLUGIN SETTINGS")
         settings_btn.setFixedHeight(26)
         settings_btn.setFont(QFont("Courier New", 7))
@@ -4871,6 +4944,11 @@ class MainWindow(QMainWindow):
         ov.show()
         ov.raise_()
         self._plugin_manager_overlay = ov   # keep a reference so it isn't GC'd
+
+    def _open_permissions(self):
+        ov = PermissionOverlay(parent=self.centralWidget())
+        self._centre_overlay(ov)
+        self._permission_overlay = ov
 
     def _open_plugin_settings(self):
         sections = self.get_plugin_settings() if self.get_plugin_settings else []

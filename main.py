@@ -1613,8 +1613,11 @@ class JarvisLive:
             self._plugin_registry = registry
             self.ui.get_plugins = registry.list_for_ui
             self.ui.get_plugin_settings = registry.settings_schemas
-            self.ui.write_log("SYS: Plugins reloaded. Reconnecting the model session.")
-            self.request_reconnect(keep_context=True, reason="plugin reload")
+            if self.session:
+                self.ui.write_log("SYS: Plugins reloaded. Reconnecting the model session.")
+                self.request_reconnect(keep_context=True, reason="plugin reload")
+            else:
+                self.ui.write_log("SYS: Plugins reloaded. Changes apply on next model connection.")
         except Exception as error:
             self._plugin_registry = previous
             self.ui.write_log(f"ERR: Plugin reload failed; previous registry kept — {error}")
