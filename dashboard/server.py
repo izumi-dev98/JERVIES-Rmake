@@ -20,7 +20,9 @@ import time
 from pathlib import Path
 
 from core.audit import clear_events, default_log_path, read_events
-from core.permissions import LEVELS, default_config_path, policy_view, save_level
+from core.permissions import (
+    EXPLANATIONS, LEVELS, default_config_path, policy_view, reset_policy, save_level,
+)
 
 _DEPS_OK = False
 try:
@@ -641,7 +643,11 @@ class DashboardServer:
         async def permissions(req: Request):
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            return JSONResponse({"ok": True, "permissions": policy_view(default_config_path())})
+            return JSONResponse({
+                "ok": True,
+                "permissions": policy_view(default_config_path()),
+                "explanations": EXPLANATIONS,
+            })
 
         @app.post("/api/permissions")
         async def update_permissions(req: Request):
@@ -656,7 +662,25 @@ class DashboardServer:
                 save_level(default_config_path(), action, level)
             except (ValueError, TypeError, OSError) as error:
                 return JSONResponse({"error": str(error)}, status_code=400)
-            return JSONResponse({"ok": True, "permissions": policy_view(default_config_path())})
+            return JSONResponse({
+                "ok": True,
+                "permissions": policy_view(default_config_path()),
+                "explanations": EXPLANATIONS,
+            })
+
+        @app.post("/api/permissions/reset")
+        async def reset_permissions(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                reset_policy(default_config_path())
+            except OSError as error:
+                return JSONResponse({"error": str(error)}, status_code=500)
+            return JSONResponse({
+                "ok": True,
+                "permissions": policy_view(default_config_path()),
+                "explanations": EXPLANATIONS,
+            })
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

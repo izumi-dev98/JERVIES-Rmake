@@ -211,7 +211,10 @@ class StabilityTests(unittest.TestCase):
         from dashboard.server import DashboardServer
 
         paths = {route.path for route in DashboardServer().app.routes}
-        self.assertTrue({"/api/health", "/api/audit", "/api/audit/clear", "/api/permissions"} <= paths)
+        self.assertTrue({
+            "/api/health", "/api/audit", "/api/audit/clear",
+            "/api/permissions", "/api/permissions/reset",
+        } <= paths)
 
 
 if __name__ == "__main__":

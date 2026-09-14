@@ -67,6 +67,8 @@
     .permission-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:5px; margin-top:9px; }
     .permission-grid label { display:flex; align-items:center; justify-content:space-between; gap:7px; color:var(--muted); font-size:10px; }
     .permission-grid select { padding:4px; background:var(--surface); border:1px solid var(--border); border-radius:5px; color:var(--text); font-size:10px; }
+    .permission-item { padding:7px; border:1px solid var(--border); border-radius:5px; }
+    .permission-description { display:block; margin-top:5px; color:var(--muted); font-size:10px; line-height:1.35; }
     .audit-filters { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; }
     .audit-filters input, .audit-filters select { min-width:105px; padding:5px 6px; background:var(--surface); border:1px solid var(--border); border-radius:5px; color:var(--text); font-size:10px; }
     #audit-list { display:none; margin:10px 0 0 18px; color:var(--muted); font:11px/1.5 monospace; max-height:120px; overflow:auto; }
@@ -176,6 +178,7 @@
     <div class="health-grid" id="health-grid"></div>
     <p id="setup-note" hidden>Setup is incomplete. Add your local API key, then restart JARVIS to connect the model.</p>
     <div class="permission-grid" id="permission-grid" aria-label="Action permissions"></div>
+    <button class="mini-btn" id="reset-permissions" type="button">Reset permission defaults</button>
     <div class="audit-filters" aria-label="Audit filters">
       <input id="audit-action" type="search" placeholder="Action" aria-label="Filter by action">
       <select id="audit-event" aria-label="Filter by event"><option value="">All events</option><option value="action">Actions</option><option value="confirmation">Confirmations</option><option value="permission">Permissions</option></select>
@@ -258,6 +261,7 @@
     const auditEvent = document.getElementById('audit-event');
     const auditStatus = document.getElementById('audit-status');
     const permissionGrid = document.getElementById('permission-grid');
+    const resetPermissions = document.getElementById('reset-permissions');
 
     function _healthLabel(key) {
       return key.replace(/_/g, ' ');
@@ -296,6 +300,8 @@
         if (!response.ok) throw new Error('Permissions unavailable');
         const payload = await response.json();
         permissionGrid.replaceChildren(...Object.entries(payload.permissions || {}).map(([action, level]) => {
+          const item = document.createElement('div');
+          item.className = 'permission-item';
           const label = document.createElement('label');
           label.textContent = action.replace(/_/g, ' ');
           const select = document.createElement('select');
@@ -312,7 +318,11 @@
             });
           });
           label.appendChild(select);
-          return label;
+          const explanation = document.createElement('span');
+          explanation.className = 'permission-description';
+          explanation.textContent = (payload.explanations || {})[action] || 'Controlled by local policy.';
+          item.append(label, explanation);
+          return item;
         }));
       } catch (_) {
         permissionGrid.replaceChildren();
@@ -340,6 +350,11 @@
     }
 
     document.getElementById('refresh-health').addEventListener('click', refreshReadiness);
+    resetPermissions.addEventListener('click', async () => {
+      if (!window.confirm('Reset all action permissions to defaults?')) return;
+      const response = await _authFetch('/api/permissions/reset', { method: 'POST' });
+      if (response.ok) await loadPermissions();
+    });
     document.getElementById('apply-audit').addEventListener('click', refreshAudit);
     document.getElementById('clear-audit').addEventListener('click', async () => {
       if (!window.confirm('Clear the local audit log?')) return;
