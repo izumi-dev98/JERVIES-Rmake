@@ -21,15 +21,15 @@
 ## Known limitations
 
 - GUI interaction tests were not run because this environment does not provide a desktop-capable PyQt test runner; UI code was compiled and statically reviewed.
-- Remote CI was not run from this workspace. The workflow is present and local commands match its test/compile intent.
+- The release commit `e304b42` was pushed to `origin/main`; GitHub CLI was unavailable and the public Actions API showed no run for that SHA at verification time, so remote CI outcome remains unobserved.
 - Credential rotation was not performed because no exposed credential was found and rotation requires user-controlled provider access.
 - Plugin reload requests a session reconnect; it does not hot-swap an already connected model session.
 - The permission UI is exposed in the remote dashboard; the desktop settings drawer does not yet have a dedicated permission editor.
 
 ## Release and rollback notes
 
-No merge, deployment, or remote CI claim is made. The user explicitly requested release work, but commit creation is left for the final user approval because the worktree includes earlier user/project changes and generated project artifacts. Roll back feature groups independently using the roadmap plan; preserve local memory and audit data unless explicitly deleted.
+Commit `e304b42` was created and pushed to `origin/main`. No deployment or merge beyond the direct main push was performed. Roll back feature groups independently using the roadmap plan; preserve local memory and audit data unless explicitly deleted.
 
 ## Next handoff
 
-Review the combined diff and decide whether to commit all current project artifacts together. Then run GitHub Actions remotely after pushing the approved commit. Separately, add a desktop permission editor and a display-backed GUI test job when the environment supports it.
+Observe the GitHub Actions run for `e304b42`, then add a desktop permission editor and a display-backed GUI test job when the environment supports it.
