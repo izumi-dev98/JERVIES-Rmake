@@ -9,6 +9,15 @@ LEVELS = ("safe", "confirm", "blocked")
 DEFAULT_LEVEL = "confirm"
 _POLICY_KEY = "permissions"
 
+EXPLANATIONS = {
+    "computer_control": "Controls the mouse, keyboard, windows, and screen. Confirm is recommended.",
+    "file_delete": "Moves files to the trash or removes them. Confirm prevents accidental deletion.",
+    "computer_shutdown": "Powers off the computer. Keep this at confirm or blocked.",
+    "computer_restart": "Restarts the computer. Keep this at confirm or blocked.",
+    "computer_toggle_wifi": "Changes the computer Wi-Fi state and may interrupt connectivity.",
+    "messaging": "Sends a message through a configured messaging action. Review before sending.",
+}
+
 
 def default_config_path() -> Path:
     return Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
@@ -38,6 +47,14 @@ def save_level(config_path: Path, action: str, level: str) -> None:
         policy = {}
     policy[str(action)] = level
     data[_POLICY_KEY] = policy
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
+def reset_policy(config_path: Path) -> None:
+    """Remove permission overrides while preserving every other setting."""
+    data = _load_config(config_path)
+    data.pop(_POLICY_KEY, None)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
@@ -74,3 +91,7 @@ def policy_view(config_path: Path) -> dict[str, str]:
         "computer_restart", "computer_toggle_wifi", "messaging",
     )
     return {key: policy.get(key, level_for(config_path, key)) for key in keys}
+
+
+def explanation_for(action: str) -> str:
+    return EXPLANATIONS.get(str(action), "This action is governed by the local permission policy.")

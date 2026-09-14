@@ -9,7 +9,7 @@ from core.audit import clear_events, read_events, write_event
 from core.health import collect_startup_health
 from core.degraded import model_status, normalize_model_state
 from core.setup_wizard import collect_setup_state, load_progress, save_progress
-from core.permissions import save_level
+from core.permissions import EXPLANATIONS, explanation_for, reset_policy, save_level
 from memory import memory_manager
 from core import llm_client
 
@@ -188,6 +188,24 @@ class StabilityTests(unittest.TestCase):
         self.assertEqual(health["model_connection"], "reconnecting")
         self.assertEqual(health["dashboard"], "available")
         self.assertNotIn("gemini_api_key", json.dumps(health))
+
+    def test_permission_explanations_and_reset_preserve_other_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "api_keys.json"
+            config_path.write_text(
+                json.dumps({"gemini_api_key": "secret", "permissions": {"messaging": "blocked"}}),
+                encoding="utf-8",
+            )
+            reset_policy(config_path)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(set(EXPLANATIONS), {
+            "computer_control", "file_delete", "computer_shutdown",
+            "computer_restart", "computer_toggle_wifi", "messaging",
+        })
+        self.assertTrue(explanation_for("messaging"))
+        self.assertNotIn("permissions", config)
+        self.assertEqual(config["gemini_api_key"], "secret")
 
     def test_dashboard_exposes_authenticated_control_routes(self):
         from dashboard.server import DashboardServer

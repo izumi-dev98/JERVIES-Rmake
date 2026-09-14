@@ -1890,7 +1890,7 @@ class PermissionOverlay(QWidget):
         note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(note)
 
-        from core.permissions import LEVELS, policy_view
+        from core.permissions import EXPLANATIONS, LEVELS, policy_view
         current = policy_view(API_FILE)
         for action, level in current.items():
             row = QHBoxLayout()
@@ -1905,8 +1905,19 @@ class PermissionOverlay(QWidget):
             self._boxes[action] = box
             row.addWidget(box)
             lay.addLayout(row)
+            explanation = QLabel(EXPLANATIONS[action])
+            explanation.setWordWrap(True)
+            explanation.setFont(QFont("Courier New", 7))
+            explanation.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(explanation)
 
         buttons = QHBoxLayout()
+        reset = QPushButton("RESET DEFAULTS")
+        reset.setFixedHeight(32)
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset.setToolTip("Remove custom permission overrides")
+        reset.clicked.connect(self._reset)
+        buttons.addWidget(reset)
         save = QPushButton("▸  SAVE PERMISSIONS")
         save.setFixedHeight(32)
         save.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1925,6 +1936,12 @@ class PermissionOverlay(QWidget):
         for action, box in self._boxes.items():
             save_level(API_FILE, action, box.currentText())
         self.hide()
+
+    def _reset(self):
+        from core.permissions import policy_view, reset_policy
+        reset_policy(API_FILE)
+        for action, box in self._boxes.items():
+            box.setCurrentText(policy_view(API_FILE)[action])
 
 
 class _HudOverlay(QWidget):
