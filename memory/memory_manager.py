@@ -423,6 +423,23 @@ def forget(key: str, category: str = "notes") -> str:
 forget_memory = forget
 
 
+def update_entry(category: str, key: str, value: str) -> str:
+    """Replace one existing local memory value while preserving its category."""
+    category = str(category or "notes").strip()
+    key = str(key or "").strip()
+    value = str(value or "").strip()
+    memory = load_memory()
+    if not key or not value or key not in memory.get(category, {}):
+        return f"Not found: {category}/{key}"
+    update_memory({category: {key: {"value": value}}})
+    return f"Updated: {category}/{key}"
+
+
+def export_memory() -> str:
+    """Return a stable JSON export of local memory for a user-selected file."""
+    return json.dumps(load_memory(), indent=2, ensure_ascii=False)
+
+
 # ── Session memory ─────────────────────────────────────────────────────────────
 
 _SESSION_MAX = 3   # safety cap — in practice 0-1 entries after pop

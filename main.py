@@ -75,6 +75,8 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
+from core.health               import collect_startup_health
+from core.setup_wizard         import collect_setup_state
 from core.action_loader        import discover_actions
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
@@ -90,7 +92,7 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-3.1-flash-live-preview"
 CHANNELS            = 1
-SEND_SAMPLE_RATE    = 16000 
+SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
@@ -176,7 +178,7 @@ def _load_system_prompt() -> str:
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
-def _clean_transcript(text: str) -> str:    
+def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
     return text.strip()
@@ -462,13 +464,17 @@ class JarvisLive:
 
         # Plugins must not collide with either an inline tool or a discovered action.
         _core_names = _inline_names | self._action_registry.names()
+        self._plugin_dir = _base_dir / "plugins"
+        self._plugin_core_names = _core_names
         self._plugin_registry = discover_plugins(
-            plugins_dir=_base_dir / "plugins",
+            plugins_dir=self._plugin_dir,
             core_tool_names=_core_names,
             logger=lambda msg: (print(f"[Plugins] {msg}"), self.ui.write_log(f"SYS: {msg}")),
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
+        self.ui.on_plugins_reload = self._reload_plugins
+        self.ui.setup_state_provider = self._setup_state
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
         # ── Wake word ────────────────────────────────────────────────────────
@@ -841,16 +847,11 @@ class JarvisLive:
                     result = await loop.run_in_executor(None, undo_stack.undo_last)
 
             elif name == "screen_process":
-                import time as _t_mod
-                _now = _t_mod.monotonic()
-                _cooldown = 4.0  # seconds — covers echo window after speaking ends
-                if self._vision_busy or (_now - self._vision_last_time) < _cooldown:
-                    _wait = max(0, _cooldown - (_now - self._vision_last_time))
-                    print(f"[Vision] ⏳ Cooldown active ({_wait:.1f}s remaining) — ignoring duplicate call")
+                if self._vision_busy:
+                    print("[Vision] ⏳ A screen request is already active — ignoring duplicate call")
                     result = "Vision is still processing the previous request. I will not call this again."
                 else:
                     self._vision_busy      = True
-                    self._vision_last_time = _now
                     angle     = args.get("angle", "screen").lower()
                     user_text = args.get("text", "What do you see?")
                     if angle == "camera":
@@ -937,6 +938,8 @@ class JarvisLive:
                     result = f"Unknown tool: {name}"
 
         except RuntimeError as e:
+            if name == "screen_process":
+                self._vision_busy = False
             if "executor" in str(e).lower() and "shutdown" in str(e).lower():
                 self._stopping = True
                 result = "JARVIS is shutting down."
@@ -945,6 +948,8 @@ class JarvisLive:
                 traceback.print_exc()
                 self.speak_error(name, e)
         except Exception as e:
+            if name == "screen_process":
+                self._vision_busy = False
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
@@ -1581,6 +1586,48 @@ class JarvisLive:
 
     # ── dashboard command relay ─────────────────────────────────────────────
 
+    def _setup_state(self) -> dict[str, dict[str, str]]:
+        try:
+            devices = {
+                "input": audio_devices.list_devices("input"),
+                "output": audio_devices.list_devices("output"),
+            }
+        except Exception:
+            devices = {}
+        plugin_rows = self._plugin_registry.list_for_ui()
+        active = len(self._plugin_registry.get_tool_declarations())
+        return collect_setup_state(
+            API_CONFIG_PATH,
+            audio_devices=devices,
+            plugin_counts=(active, len(plugin_rows) - active),
+        )
+
+    def _reload_plugins(self) -> None:
+        previous = self._plugin_registry
+        try:
+            registry = discover_plugins(
+                plugins_dir=self._plugin_dir,
+                core_tool_names=self._plugin_core_names,
+                logger=lambda msg: (print(f"[Plugins] {msg}"), self.ui.write_log(f"SYS: {msg}")),
+            )
+            self._plugin_registry = registry
+            self.ui.get_plugins = registry.list_for_ui
+            self.ui.get_plugin_settings = registry.settings_schemas
+            self.ui.write_log("SYS: Plugins reloaded. Reconnecting the model session.")
+            self.request_reconnect(keep_context=True, reason="plugin reload")
+        except Exception as error:
+            self._plugin_registry = previous
+            self.ui.write_log(f"ERR: Plugin reload failed; previous registry kept — {error}")
+
+    def _startup_health(self) -> dict[str, str]:
+        return collect_startup_health(
+            API_CONFIG_PATH,
+            action_count=len(self._action_registry.names()),
+            plugin_count=len(self._plugin_registry.get_tool_declarations()),
+            model_connection="connected" if self.session else "offline",
+            dashboard_status="available" if self._dashboard else "unavailable",
+        )
+
     async def _process_dashboard_commands(self) -> None:
         while True:
             try:
@@ -1643,6 +1690,7 @@ class JarvisLive:
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
             self._dashboard.set_connect_callback(self._on_phone_connected)
+            self._dashboard.set_health_callback(self._startup_health)
             asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())

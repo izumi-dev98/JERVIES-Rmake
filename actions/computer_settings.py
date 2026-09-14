@@ -22,6 +22,7 @@ except ImportError:
     _PYPERCLIP = False
 
 from core import confirm
+from core.permissions import default_config_path, level_for
 from core.undo import push_undo
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -787,9 +788,6 @@ def computer_settings(
     player=None,
     session_memory=None,
 ) -> str:
-    if not _PYAUTOGUI:
-        return "pyautogui is not installed. Run: pip install pyautogui"
-
     params      = parameters or {}
     raw_action  = params.get("action", "").strip()
     description = params.get("description", "").strip()
@@ -805,6 +803,12 @@ def computer_settings(
 
     if not action:
         return _suggest(description or raw_action)
+
+    if level_for(default_config_path(), "computer_settings", {"action": action}) == "blocked":
+        return f"Action 'computer_{action}' is blocked by local permissions."
+
+    if not _PYAUTOGUI:
+        return "pyautogui is not installed. Run: pip install pyautogui"
 
     print(f"[Settings] Action: {action}  Value: {value}  OS: {_OS}")
     if player:

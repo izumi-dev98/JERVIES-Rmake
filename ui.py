@@ -32,9 +32,11 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QGridLayout, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+
+from core.setup_wizard import collect_setup_state, load_progress, save_progress
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -58,6 +60,7 @@ def _base_dir() -> Path:
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
+SETUP_PROGRESS_FILE = CONFIG_DIR / "setup_progress.json"
 
 
 def _read_full_config() -> dict:
@@ -1223,6 +1226,7 @@ class _CameraPreview(QWidget):
 
 class SetupOverlay(QWidget):
     done = pyqtSignal(str, str)
+    repair_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1239,6 +1243,7 @@ class SetupOverlay(QWidget):
             _OS.lower(), "linux"
         )
         self._sel_os = detected
+        self.setup_state_provider = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 22, 30, 22)
@@ -1253,7 +1258,7 @@ class SetupOverlay(QWidget):
             w.setStyleSheet(f"color: {color}; background: transparent;")
             return w
 
-        layout.addWidget(_lbl("◈  INITIALISATION REQUIRED", 13, True))
+        layout.addWidget(_lbl("◈  INITIALISATION WIZARD", 13, True))
         layout.addWidget(_lbl("Configure J.A.R.V.I.S. before first boot.", 9, color=C.PRI_DIM))
         layout.addSpacing(6)
 
@@ -1300,7 +1305,44 @@ class SetupOverlay(QWidget):
             self._os_btns[key] = btn
         layout.addLayout(os_row)
         self._sel(detected)
-        layout.addSpacing(12)
+        layout.addSpacing(8)
+
+        check_frame = QFrame()
+        check_frame.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 3px;"
+        )
+        check_layout = QGridLayout(check_frame)
+        check_layout.setContentsMargins(8, 6, 8, 6)
+        check_layout.setHorizontalSpacing(8)
+        check_layout.setVerticalSpacing(4)
+        check_layout.addWidget(_lbl("READINESS", 8, True, C.TEXT_DIM,
+                                    Qt.AlignmentFlag.AlignLeft), 0, 0, 1, 2)
+        self._check_rows: dict[str, tuple[QLabel, QLabel, QPushButton]] = {}
+        labels = {
+            "api_key": "API key",
+            "model": "Model",
+            "microphone": "Microphone",
+            "speaker": "Speaker",
+            "plugins": "Plugins",
+            "permissions": "Permissions",
+        }
+        for row, (key, label) in enumerate(labels.items(), start=1):
+            name = _lbl(label.upper(), 7, True, C.TEXT_MED, Qt.AlignmentFlag.AlignLeft)
+            status = _lbl("CHECKING", 7, True, C.ACC2, Qt.AlignmentFlag.AlignLeft)
+            detail = _lbl("", 7, False, C.TEXT_DIM, Qt.AlignmentFlag.AlignLeft)
+            repair = QPushButton("REPAIR")
+            repair.setFixedHeight(20)
+            repair.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            repair.setCursor(Qt.CursorShape.PointingHandCursor)
+            repair.clicked.connect(lambda _, check=key: self.repair_requested.emit(check))
+            check_layout.addWidget(name, row, 0)
+            check_layout.addWidget(status, row, 1)
+            check_layout.addWidget(detail, row, 2)
+            check_layout.addWidget(repair, row, 3)
+            self._check_rows[key] = (status, detail, repair)
+        layout.addWidget(check_frame)
+        self._refresh_checks()
+        layout.addSpacing(8)
 
         init_btn = QPushButton("▸  INITIALISE SYSTEMS")
         init_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
@@ -1317,6 +1359,39 @@ class SetupOverlay(QWidget):
         """)
         init_btn.clicked.connect(self._submit)
         layout.addWidget(init_btn)
+
+    def _refresh_checks(self):
+        try:
+            from core.audio_devices import list_devices
+            devices = {
+                "input": list_devices("input"),
+                "output": list_devices("output"),
+            }
+        except Exception:
+            devices = {}
+        state = (self.setup_state_provider() if self.setup_state_provider
+             else collect_setup_state(API_FILE, audio_devices=devices))
+        completed = load_progress(SETUP_PROGRESS_FILE).get("completed", {})
+        colours = {
+            "ready": C.GREEN,
+            "blocked": C.RED,
+            "attention": C.ACC,
+            "manual": C.ACC2,
+            "pending": C.TEXT_DIM,
+        }
+        for key, (status, detail, repair) in self._check_rows.items():
+            item = state[key]
+            status.setText(item["status"].upper())
+            status.setStyleSheet(f"color: {colours.get(item['status'], C.TEXT_DIM)}; background: transparent;")
+            detail_text = item["detail"]
+            if completed.get(key):
+                detail_text = f"Completed · {detail_text}"
+            detail.setText(detail_text)
+            repair.setEnabled(bool(item["repair"]))
+            repair.setVisible(bool(item["repair"]))
+
+    def mark_complete(self, checks: dict[str, bool]):
+        save_progress(SETUP_PROGRESS_FILE, checks)
 
     def _sel(self, key: str):
         self._sel_os = key
@@ -1665,6 +1740,8 @@ class CustomizeOverlay(QWidget):
 class PluginManagerOverlay(QWidget):
     """Floating overlay — lists discovered plugins with per-plugin ON/OFF toggles."""
 
+    reload_requested = pyqtSignal()
+
     _OW = 420
 
     def __init__(self, plugins: list[dict], parent=None):
@@ -1701,6 +1778,18 @@ class PluginManagerOverlay(QWidget):
             lay.addLayout(self._build_row(p))
 
         lay.addSpacing(4)
+        reload_btn = QPushButton("↻  RELOAD PLUGINS")
+        reload_btn.setFixedHeight(30)
+        reload_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        reload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reload_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        reload_btn.clicked.connect(self.reload_requested.emit)
+        lay.addWidget(reload_btn)
+
         close_btn = QPushButton("CLOSE")
         close_btn.setFixedHeight(30)
         close_btn.setFont(QFont("Courier New", 9))
@@ -2104,6 +2193,18 @@ class MemoryOverlay(_HudOverlay):
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._lay.addWidget(hdr)
 
+        export_btn = QPushButton("EXPORT MEMORY")
+        export_btn.setFixedHeight(24)
+        export_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        export_btn.clicked.connect(self._export)
+        self._lay.addWidget(export_btn)
+
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         self._lay.addWidget(sep)
@@ -2164,6 +2265,15 @@ class MemoryOverlay(_HudOverlay):
                     lambda _=False, c=r["category"], k=r["key"]: self._forget(c, k))
                 line.addWidget(rm)
 
+                edit = QPushButton("EDIT")
+                edit.setFixedHeight(20)
+                edit.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                edit.setCursor(Qt.CursorShape.PointingHandCursor)
+                edit.setToolTip("Edit this memory")
+                edit.clicked.connect(
+                    lambda _=False, c=r["category"], k=r["key"], v=r["value"]: self._edit(c, k, v))
+                line.addWidget(edit)
+
                 holder = QWidget()
                 holder.setLayout(line)
                 ilay.addWidget(holder)
@@ -2198,6 +2308,30 @@ class MemoryOverlay(_HudOverlay):
         # Qt is entitled to touch the sender after a slot returns; tearing it
         # down mid-emission is how a widget ends up half-alive on screen.
         QTimer.singleShot(0, self._rebuild)
+
+    def _edit(self, category: str, key: str, value: str):
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+        new_value, accepted = QInputDialog.getText(
+            self, "EDIT MEMORY", f"{category}/{key}",
+            QLineEdit.EchoMode.Normal, value,
+        )
+        if not accepted or not new_value.strip():
+            return
+        from memory.memory_manager import update_entry
+        update_entry(category, key, new_value)
+        QTimer.singleShot(0, self._rebuild)
+
+    def _export(self):
+        from memory.memory_manager import export_memory
+        path, _ = QFileDialog.getSaveFileName(
+            self, "EXPORT MEMORY", "jarvis-memory.json", "JSON files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(export_memory(), encoding="utf-8")
+        except OSError:
+            pass
 
 
 class ClipboardPanel(QWidget):
@@ -2820,6 +2954,8 @@ class MainWindow(QMainWindow):
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
+        self.on_plugins_reload = None   # callable: () -> None, set by JarvisLive
+        self.setup_state_provider = None
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_wake_now       = None   # callable: () -> None — explicit wake only
@@ -3427,7 +3563,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
-            ow, oh = 460, 390
+            ow, oh = 520, 620
             self._overlay.setGeometry(
                 (cw.width()  - ow) // 2,
                 (cw.height() - oh) // 2,
@@ -4724,6 +4860,8 @@ class MainWindow(QMainWindow):
         plugins = self.get_plugins() if self.get_plugins else []
         cw = self.centralWidget()
         ov = PluginManagerOverlay(plugins, parent=cw)
+        if self.on_plugins_reload:
+            ov.reload_requested.connect(self.on_plugins_reload)
         ov.adjustSize()
         ov.setGeometry(
             (cw.width()  - ov.width())  // 2,
@@ -4834,23 +4972,44 @@ class MainWindow(QMainWindow):
 
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
+        ov.setup_state_provider = self.setup_state_provider
         cw = self.centralWidget()
-        ow, oh = 460, 390
+        ow, oh = 520, 620
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,
             ow, oh,
         )
         ov.done.connect(self._on_setup_done)
+        ov.repair_requested.connect(self._on_setup_repair)
         ov.show()
         self._overlay = ov
 
+    def _on_setup_repair(self, check: str):
+        if check in ("api_key", "model"):
+            self._overlay._key_input.setFocus() if self._overlay else None
+        elif check in ("microphone", "speaker"):
+            self._open_audio_devices()
+        elif check == "plugins":
+            self._open_plugin_manager()
+        else:
+            self._log.append_log("SYS: Review microphone, speaker, and desktop permissions in system settings.")
+
     def _on_setup_done(self, key: str, os_name: str):
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        config = _read_full_config()
+        config.update({"gemini_api_key": key, "os_system": os_name})
         API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
+            json.dumps(config, indent=4),
             encoding="utf-8",
         )
+        if self._overlay:
+            self._overlay.mark_complete({
+                "api_key": True,
+                "model": True,
+                "microphone": True,
+                "speaker": True,
+            })
         self._ready = True
         if self._overlay:
             self._overlay.hide()
@@ -4935,6 +5094,22 @@ class JarvisUI:
     @on_audio_device_change.setter
     def on_audio_device_change(self, cb):
         self._win.on_audio_device_change = cb
+
+    @property
+    def on_plugins_reload(self):
+        return self._win.on_plugins_reload
+
+    @on_plugins_reload.setter
+    def on_plugins_reload(self, cb):
+        self._win.on_plugins_reload = cb
+
+    @property
+    def setup_state_provider(self):
+        return self._win.setup_state_provider
+
+    @setup_state_provider.setter
+    def setup_state_provider(self, cb):
+        self._win.setup_state_provider = cb
 
     def set_connection_status(self, status: str) -> None:
         """Thread-safe: show Live API connection state in the navbar and usage panel."""

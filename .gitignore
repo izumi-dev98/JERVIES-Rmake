@@ -49,6 +49,12 @@ logs/
 downloads/
 screenshots/
 
+# Explicit secret paths. Keep comments on their own lines so Git matches them.
+config/api_keys.json
+config/certs/
+config/whatsapp_web/
+config/setup_progress.json
+
 # ── Generated and personal Galaxy content ───────────────────────────────────
 notes/
 viewer/graph-data.js

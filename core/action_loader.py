@@ -34,6 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core.audit import write_event
+from core.confirm import request as request_confirmation
+from core.permissions import default_config_path, level_for, permission_key
+
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
@@ -74,8 +78,32 @@ class ActionRegistry:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
+        permission = level_for(default_config_path(), name, parameters)
+        action_key = permission_key(name, parameters)
+        if permission == "blocked":
+            write_event("permission", action_key, "blocked")
+            return f"Action '{action_key}' is blocked by local permissions."
+        write_event("action", name, "started")
+
+        def run_handler() -> str:
+            try:
+                result = _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+                write_event("action", action_key, "succeeded")
+                return result
+            except Exception:
+                write_event("action", action_key, "failed")
+                raise
+
+        if permission == "confirm" and name != "computer_settings":
+            write_event("permission", action_key, "awaiting_confirmation")
+            return request_confirmation(
+                key=action_key,
+                title=f"Allow {action_key.replace('_', ' ')}?",
+                detail="This action is controlled by your local permission policy.",
+                run=run_handler,
+            )
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            return run_handler()
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()

@@ -11,12 +11,16 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import json
 import re
 import secrets
 import socket
 import string
 import time
 from pathlib import Path
+
+from core.audit import clear_events, default_log_path, read_events
+from core.permissions import LEVELS, default_config_path, policy_view, save_level
 
 _DEPS_OK = False
 try:
@@ -378,6 +382,7 @@ class DashboardServer:
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
         self._connect_callback            = None
+        self._health_callback             = None
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
@@ -431,6 +436,9 @@ class DashboardServer:
 
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
+
+    def set_health_callback(self, fn) -> None:
+        self._health_callback = fn
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -603,6 +611,52 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
+
+        @app.get("/api/health")
+        async def health(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            data = self._health_callback() if self._health_callback else {}
+            return JSONResponse({"ok": True, "health": data})
+
+        @app.get("/api/audit")
+        async def audit(req: Request, event: str = "", action: str = "",
+                        status: str = "", since: str = "", until: str = "",
+                        limit: int = 100):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            records = read_events(
+                default_log_path(BASE_DIR), event=event, action=action,
+                status=status, since=since, until=until, limit=limit,
+            )
+            return JSONResponse({"ok": True, "records": records})
+
+        @app.post("/api/audit/clear")
+        async def clear_audit(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse({"ok": clear_events(default_log_path(BASE_DIR))})
+
+        @app.get("/api/permissions")
+        async def permissions(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return JSONResponse({"ok": True, "permissions": policy_view(default_config_path())})
+
+        @app.post("/api/permissions")
+        async def update_permissions(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                action = str(body.get("action", "")).strip()
+                level = str(body.get("level", "")).strip()
+                if not action or level not in LEVELS:
+                    raise ValueError("action and valid level are required")
+                save_level(default_config_path(), action, level)
+            except (ValueError, TypeError, OSError) as error:
+                return JSONResponse({"error": str(error)}, status_code=400)
+            return JSONResponse({"ok": True, "permissions": policy_view(default_config_path())})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

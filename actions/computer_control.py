@@ -213,6 +213,18 @@ def _move(x: int, y: int, duration: float = 0.3) -> str:
     return f"Mouse → ({x}, {y})"
 
 
+def _mouse_position() -> str:
+    _require_pyautogui()
+    x, y = pyautogui.position()
+    return f"Mouse position: {x},{y}"
+
+
+def _screen_size() -> str:
+    _require_pyautogui()
+    width, height = pyautogui.size()
+    return f"Screen size: {width}x{height}"
+
+
 def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
     _require_pyautogui()
     pyautogui.moveTo(x1, y1, duration=0.2)
@@ -389,6 +401,8 @@ def computer_control(
       double_click  — double left click
       right_click   — right click
       move          — move mouse
+            mouse_position — return current mouse coordinates
+            screen_size   — return primary screen dimensions
       drag          — click-drag between two points
       hotkey        — key combination
       press         — single key
@@ -437,6 +451,12 @@ def computer_control(
 
         if action == "move":
             return _move(int(params.get("x", 0)), int(params.get("y", 0)))
+
+        if action == "mouse_position":
+            return _mouse_position()
+
+        if action == "screen_size":
+            return _screen_size()
 
         if action == "drag":
             return _drag(
@@ -517,13 +537,17 @@ def computer_control(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_control",
-    "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+    "description": (
+        "Direct visual computer control. Use screen_process to inspect the screen, "
+        "then use screen_click for visible elements or coordinates for precise actions. "
+        "Supports typing, clicking, dragging, hotkeys, scrolling, screenshots, and window focus."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"
+                "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | mouse_position | screen_size | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"
             },
             "text": {
                 "type": "STRING",

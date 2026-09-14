@@ -40,6 +40,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.audit import write_event
+
 # A pending confirmation is abandoned after this long. Chosen to outlast a
 # normal "hang on, let me look at the screen" pause without leaving a live
 # shutdown button sitting on the HUD for the rest of the day.
@@ -90,6 +92,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     if _show_cb is None:
         # No interface bound (headless, or a very early call). Refuse rather
         # than silently performing something irreversible.
+        write_event("confirmation", key, "unavailable")
         return (f"I cannot confirm '{title}' right now because the interface is "
                 f"not available, so I have not done it.")
 
@@ -102,8 +105,10 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     except Exception as e:
         with _lock:
             _pending = None
+        write_event("confirmation", key, "failed")
         return f"Could not ask for confirmation: {e}. Nothing was done."
 
+    write_event("confirmation", key, "requested")
     _log(f"SYS: Awaiting confirmation — {title}")
     return (
         f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
@@ -133,18 +138,24 @@ def resolve(accepted: bool) -> None:
         return
 
     if time.monotonic() - p.at > TIMEOUT_SECONDS:
+        write_event("confirmation", p.key, "expired")
         _log(f"SYS: Confirmation expired — {p.title}")
         return
 
     if not accepted:
+        write_event("confirmation", p.key, "cancelled")
         _log(f"SYS: Cancelled — {p.title}")
         return
+
+    write_event("confirmation", p.key, "accepted")
 
     def _worker():
         try:
             result = p.run() or "Done."
+            write_event("confirmation", p.key, "completed")
             _log(f"SYS: Confirmed — {p.title}. {result}")
         except Exception as e:
+            write_event("confirmation", p.key, "failed")
             _log(f"ERR: {p.title} failed — {e}")
 
     threading.Thread(target=_worker, daemon=True,

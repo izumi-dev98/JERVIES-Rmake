@@ -21,13 +21,15 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 # Pretrained openwakeword model that listens for "Hey Jarvis".
 WAKE_MODEL = "hey_jarvis"
 # Score in [0,1]; above this counts as a detection. Tunable per environment.
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = 0.4
+DETECTION_COOLDOWN_SECONDS = 2.0
 # Mic frames arrive at 16 kHz int16; this is just the detector's input rate.
 SAMPLE_RATE = 16000
 
@@ -120,6 +122,7 @@ class WakeWordDetector:
         self._running = False
         self._model = None
         self._ready = False
+        self._last_detection = 0.0
 
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
@@ -184,7 +187,9 @@ class WakeWordDetector:
                             score = max(score, float(v))
                     if score == 0.0 and scores:
                         score = max(float(v) for v in scores.values())
-                if score >= self._threshold:
+                now = time.monotonic()
+                if score >= self._threshold and now - self._last_detection >= DETECTION_COOLDOWN_SECONDS:
+                    self._last_detection = now
                     # drain any backlog so we don't double-fire on the same utterance
                     self._drain()
                     try:
