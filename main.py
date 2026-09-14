@@ -76,6 +76,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core.health               import collect_startup_health
+from core.degraded             import normalize_model_state
 from core.setup_wizard         import collect_setup_state
 from core.action_loader        import discover_actions
 from core.wake_word            import (
@@ -395,6 +396,7 @@ class JarvisLive:
         self.ui             = ui
         self._asst_name     = "JARVI    S"   # updated each session from config
         self.session              = None
+        self._model_connection    = "starting"
         self.audio_in_queue       = None
         self.out_queue            = None
         self._loop                     = None
@@ -1627,9 +1629,17 @@ class JarvisLive:
             API_CONFIG_PATH,
             action_count=len(self._action_registry.names()),
             plugin_count=len(self._plugin_registry.get_tool_declarations()),
-            model_connection="connected" if self.session else "offline",
+            model_connection=self._model_connection,
             dashboard_status="available" if self._dashboard else "unavailable",
         )
+
+    def _publish_model_state(self, state: str) -> None:
+        self._model_connection = normalize_model_state(state)
+        self.ui.set_connection_status(self._model_connection)
+        if self._dashboard:
+            asyncio.create_task(self._dashboard.broadcast({
+                "type": "status", "state": self._model_connection,
+            }))
 
     async def _process_dashboard_commands(self) -> None:
         while True:
@@ -1704,7 +1714,7 @@ class JarvisLive:
         while not self._stopping:
             try:
                 print("[JARVIS] Connecting...")
-                self.ui.set_connection_status("connecting")
+                self._publish_model_state("starting")
                 self.ui.set_state("THINKING")
                 _resumed_with = self._resume_handle is not None
                 config = self._build_config()
@@ -1735,7 +1745,7 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
-                    self.ui.set_connection_status("connected")
+                    self._publish_model_state("connected")
                     self.ui.set_active_model("gemini", LIVE_MODEL.rsplit("/", 1)[-1])
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
@@ -1830,6 +1840,7 @@ class JarvisLive:
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
+                self._publish_model_state("offline")
 
                 # Live can report optional preview-feature rejection as a
                 # generic 1008 policy close. Retry once without proactivity.
@@ -1887,7 +1898,7 @@ class JarvisLive:
                     asyncio.create_task(self._save_session_summary())
 
             self.set_speaking(False)
-            self.ui.set_connection_status("reconnecting")
+            self._publish_model_state("reconnecting")
             self.ui.set_state("SLEEPING")
 
             if self._dashboard:

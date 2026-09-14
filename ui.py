@@ -3975,6 +3975,9 @@ class MainWindow(QMainWindow):
         labels = {
             "connected": ("●  JARVIS CONNECTED", C.GREEN),
             "reconnecting": ("◌  JARVIS RECONNECTING", C.ACC2),
+            "offline": ("●  MODEL OFFLINE · LOCAL READY", C.ACC2),
+            "starting": ("◌  JARVIS STARTING", C.ACC2),
+            "stopped": ("●  JARVIS STOPPED", C.RED),
             "disconnected": ("●  JARVIS DISCONNECTED", C.RED),
             "connecting": ("◌  JARVIS CONNECTING", C.ACC2),
         }

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from core.action_loader import ActionRecord, ActionRegistry
 from core.audit import clear_events, read_events, write_event
 from core.health import collect_startup_health
+from core.degraded import model_status, normalize_model_state
 from core.setup_wizard import collect_setup_state, load_progress, save_progress
 from core.permissions import save_level
 from memory import memory_manager
@@ -165,6 +166,28 @@ class StabilityTests(unittest.TestCase):
 
         self.assertEqual(result, {"content": "hello", "tool_calls": []})
         self.assertEqual(post.call_args.args[0], "http://model/v1/chat/completions")
+
+    def test_degraded_model_state_keeps_local_features_available(self):
+        self.assertEqual(normalize_model_state("network failure"), "offline")
+        self.assertEqual(model_status("offline"), {
+            "state": "offline",
+            "local_features": "available",
+            "natural_language": "unavailable",
+        })
+
+    def test_health_reports_reconnecting_model_without_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            health = collect_startup_health(
+                Path(directory) / "missing.json",
+                action_count=1,
+                plugin_count=0,
+                model_connection="reconnecting",
+                dashboard_status="available",
+            )
+
+        self.assertEqual(health["model_connection"], "reconnecting")
+        self.assertEqual(health["dashboard"], "available")
+        self.assertNotIn("gemini_api_key", json.dumps(health))
 
     def test_dashboard_exposes_authenticated_control_routes(self):
         from dashboard.server import DashboardServer
