@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check requests fastapi uvicorn cryptography
       - name: Compile Python sources
         run: python -m compileall -q core actions dashboard tests
       - name: Run baseline tests
